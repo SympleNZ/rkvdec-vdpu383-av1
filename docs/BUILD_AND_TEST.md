@@ -58,7 +58,7 @@ low nibble is written first then the high nibble; each 16-byte line is reversed
 (little-endian). `regs_full.dat` is the raw `Vdpu383RegSet` struct (ctrl_regs
 @reg8, comm_paras @reg64, comm_addrs @reg128). The triage scripts used to decode
 and diff these (`decode_stream.py`, the register-mapping C helper, the per-row Y
-scanner) accompany the session logs in the parent project.
+scanner) accompany the development notes for this driver.
 
 ## What to look at
 
