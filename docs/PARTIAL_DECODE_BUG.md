@@ -114,6 +114,39 @@ visibility. This is the same shape as the other two open VDPU383 V4L2 bugs:
   registers/GBL/probs byte-identical to MPP; below-MMIO.
 - **AV1** intra above-row context for SB row ≥ 1 (this bug).
 
+## 5b. A lever below the register interface: RCB placement (SRAM vs DRAM)
+
+Reading the Rockchip BSP kernel driver (`drivers/video/rockchip/mpp/mpp_rkvdec2.c`)
+shows the working stack treats RCB differently from a mainline V4L2 client, in a way
+the `regs_full.dat` diff could not see:
+
+- `mpp_set_rcbbuf()` runs **in the kernel at submit time** and rewrites the RCB base
+  registers (reg140–160): it points them at the SRAM window only when the DT provides
+  `rockchip,rcb-iova` **and** `frame_width >= rcb_min_width`; otherwise it leaves them
+  pointing at the HAL's **DRAM** buffers.
+- The BSP board's live DT has **no `rcb-iova` / `rcb-min-width`**, so the working MPP
+  stack decodes this vector with **DRAM RCB**. Because the base-register rewrite is in
+  the kernel, *after* the HAL dump, §3.3's register comparison never saw it.
+- Our mainline V4L2 driver always uses **SRAM** RCB (`rkvdec-rcb.c`; slot-4 `type=1`).
+
+**Experiment.** Forcing all-DRAM RCB in our driver (gate off the SRAM `gen_pool`
+path) **changed the regional decode pattern**: super-block row 4 (rows 256–287), which
+is flat fill under SRAM RCB, **reconstructed** under DRAM RCB on the first decode after
+module load. There is also a first-decode-vs-subsequent state dependence. Stable across
+reruns.
+
+So the partial decode is **sensitive to RCB intra-above-row buffer placement and state**
+— it is *not* fully opaque silicon; it is at least partly in our control. Neither SRAM
+nor DRAM alone produces a correct frame, which is consistent with a HW-internal above-row
+read-after-write path that behaves differently for the SRAM vs DRAM ports (HW→HW, no CPU
+in the loop). Untried levers: cached RCB + cache management (the BSP allocates through
+`dma-buf-cache`), `IOMMU_CACHE`, per-frame RCB init, and exact replication of MPP's RCB
+sizing/placement.
+
+This is shared infrastructure: the same RCB allocator and the same in-kernel base rewrite
+apply to H.264/HEVC/VP9 on this IP, so the SRAM-vs-DRAM divergence (and the dump blind
+spot) is **cross-codec**, not AV1-specific.
+
 ## 6. The question
 
 Is there a one-time device / session setup the vendor stack performs through its

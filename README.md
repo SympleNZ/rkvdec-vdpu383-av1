@@ -89,10 +89,25 @@ a HW-session/context setup MPP performs through its `mpp_service` kernel path th
 has no V4L2 register equivalent — below the MMIO interface, where the driver has
 no visibility.
 
-**The question for someone with the VDPU383 docs:** is there a one-time device /
-session setup (outside the per-frame register programming) that arms the VDPU383
-intra above-row-context reconstruction across super-block rows, that a mainline
-V4L2 m2m client wouldn't do? Even a "look at X" would unblock it.
+**A lever was found below the register interface (RCB placement).** Reading the
+Rockchip BSP kernel driver (`mpp_rkvdec2.c`) shows `mpp_set_rcbbuf()` **rewrites the
+RCB base registers in the kernel at submit time** — pointing them at SRAM only when
+the DT wires `rockchip,rcb-iova` and the frame is wider than `rcb_min_width`,
+otherwise leaving RCB in **DRAM**. The BSP board's DT has no `rcb-iova`, so the
+working MPP stack decodes with **DRAM RCB** — and because that rewrite happens in the
+kernel *after* the HAL register dump, it is invisible to the `regs_full.dat` diff
+above. Our mainline V4L2 driver always uses **SRAM** RCB. Forcing all-DRAM RCB in our
+driver **changed the regional decode pattern** (a super-block row that was fill under
+SRAM reconstructed under DRAM), with a first-decode-vs-subsequent state dependence.
+So the failure is **sensitive to RCB intra-above-row buffer placement and state** —
+i.e. partly in our control — though neither SRAM nor DRAM alone yields a correct
+frame, consistent with a HW-internal above-row read-after-write path difference.
+
+**The question for someone with the VDPU383 docs:** what is the RCB intra-above-row
+buffer contract the vendor stack relies on (placement / coherency / the in-kernel
+base rewrite) that arms the VDPU383 above-row-context reconstruction across
+super-block rows, which a mainline V4L2 m2m client doesn't replicate? Even a
+"look at X" would unblock it.
 
 ---
 
