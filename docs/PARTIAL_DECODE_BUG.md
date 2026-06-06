@@ -143,9 +143,12 @@ in the loop). Untried levers: cached RCB + cache management (the BSP allocates t
 `dma-buf-cache`), `IOMMU_CACHE`, per-frame RCB init, and exact replication of MPP's RCB
 sizing/placement.
 
-This is shared infrastructure: the same RCB allocator and the same in-kernel base rewrite
-apply to H.264/HEVC/VP9 on this IP, so the SRAM-vs-DRAM divergence (and the dump blind
-spot) is **cross-codec**, not AV1-specific.
+This is shared infrastructure — the same RCB allocator and in-kernel base rewrite apply
+to H.264/HEVC/VP9 — so the SRAM-vs-DRAM *divergence* (and the dump blind spot) is
+cross-codec. But A/B-testing the placement on the other codecs shows the *sensitivity* is
+**AV1-specific**: forcing DRAM RCB does not change the H.264 deblock race (clean 6/8 vs
+5/8, N=8) or the VP9 compound collapse (487/789 frames wrong under both). Only AV1's
+intra above-row context responds to RCB placement.
 
 ## 6. The question
 
