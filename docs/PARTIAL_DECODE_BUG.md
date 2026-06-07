@@ -105,14 +105,17 @@ adequately-sized buffer, yet SB row ≥ 1 still predicts from wrong context.
 GBL + CDF + every register + the full bitstream all match the known-good MPP
 backend, and the same silicon decodes the vector correctly under MPP — so the
 divergence is **below the MMIO register interface**, where the V4L2 driver has no
-visibility. This is the same shape as the other two open VDPU383 V4L2 bugs:
+visibility. This is the same below-MMIO shape as two sibling VDPU383 V4L2 bugs
+(one since fixed):
 
 - **H.264** deblock race (rows 4/12 mod 16, non-deterministic) — every register /
-  clock / cache / RCB matched to MPP, still races; wiring it through the
-  link-table submit path raced at the same rate. Below-MMIO.
+  clock / cache / RCB matched to MPP, still raced (incl. via the link-table submit
+  path). **Since FIXED:** an RK3576 power-up warmup at `pm_runtime` resume gives
+  64/64 bit-exact — confirming this class is HW-execution-level and can be
+  unblocked from outside per-frame register programming.
 - **VP9** compound (`reference_mode = SELECT`) collapses to an alt-ref copy —
-  registers/GBL/probs byte-identical to MPP; below-MMIO.
-- **AV1** intra above-row context for SB row ≥ 1 (this bug).
+  registers/GBL/probs byte-identical to MPP; below-MMIO. **Open** (vendor).
+- **AV1** intra above-row context for SB row ≥ 1 (this bug). **Open** (vendor).
 
 ## 5b. A lever below the register interface: RCB placement (SRAM vs DRAM)
 

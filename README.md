@@ -81,8 +81,10 @@ nothing. The full triage — including the register diff, the RCB sizing analysi
 and the stream byte-comparison — is in
 [`docs/PARTIAL_DECODE_BUG.md`](docs/PARTIAL_DECODE_BUG.md).
 
-**Conclusion.** This is the same class as the two other open VDPU383 V4L2 bugs we
-hit (the H.264 deblock race and the VP9 compound-prediction collapse):
+**Conclusion.** This is the same below-MMIO class as the VP9 compound-prediction
+collapse (still open) and the H.264 deblock race — which we have since **fixed**
+(an RK3576 power-up warmup at `pm_runtime` resume; 64/64 bit-exact), showing this
+class can be unblocked from outside per-frame register programming:
 *registers/headers/CDF/stream all match MPP, the hardware differs anyway.* The
 remaining variable is the IP's internal intra above-row-context state machine, or
 a HW-session/context setup MPP performs through its `mpp_service` kernel path that
