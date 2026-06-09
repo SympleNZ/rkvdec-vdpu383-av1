@@ -20,7 +20,7 @@ fully-triaged question for the people with the hardware documentation
 (Collabora / the VDPU383 maintainers). See
 [The partial-decode bug](#the-partial-decode-bug-the-open-question).
 
-> Status as of 2026-06-06. Independent development on the RK3576 VDPU383, sibling
+> Status as of 2026-06-08. Independent development on the RK3576 VDPU383, sibling
 > of [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — same
 > SoC, same source tree, same downstream-first approach.
 

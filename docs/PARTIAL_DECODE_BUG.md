@@ -153,6 +153,37 @@ cross-codec. But A/B-testing the placement on the other codecs shows the *sensit
 5/8, N=8) or the VP9 compound collapse (487/789 frames wrong under both). Only AV1's
 intra above-row context responds to RCB placement.
 
+## 5c. Driver-side levers probed (2026-06-08): a small-frame cache lever; layout negative
+
+Following the RCB-placement lead, three more driver-side levers were A/B'd:
+
+- **Per-kick decoder cache-clear — a real but small-frame-only lever.** The AV1 backend was
+  missing the BSP's per-kick decoder read-cache clear (CACHE0; the VP9/H.264 backends already
+  do it). Adding it **materially improves small (<512-wide) frames** — e.g. the all-intra
+  conformance vector's frame-0 mean abs error dropped ~2.7× — but has **no effect on
+  real-content resolution**: a 1080p clip stays partial (MAE unchanged). So a genuine
+  driver-side cache lever exists for small/conformance frames, but it does not extend to
+  ≥512-wide content.
+
+- **RCB layout re-pack to MPP's exact 1080p table — negative.** Re-packing the RCB base/size
+  registers byte-exact to MPP's captured 1080p layout (correct slot order, sizes, cumulative
+  offsets) within our block ran cleanly (no IOMMU faults) but left the 1080p output
+  **byte-unchanged** (MAE 104, same as baseline). So the RCB *layout* (offsets/sizes/packing)
+  is not the ≥512 fix.
+
+- **Intra above-row RCB (slot 4) content dump.** Dumping slot 4 (`RCB_INTRA_IN_ROW`,
+  HW-written above-row context) post-decode per frame shows distinct structured content per
+  frame, and the flat-DC region (lower SB rows) carries a **uniform repeating above-row
+  value** consistent with the partial decode (top rows real, lower rows collapse to DC). A
+  direct ours-vs-MPP slot-4 *content* diff is still open (the BSP MPP AV1 dump does not emit
+  an RCB file; it needs an MPP-side dump hook + rebuild) — but given §4 (slot-4 size/RAM
+  override no-effect) and §5b (placement only partially moves it, neither port correct), this
+  would most likely confirm the below-MMIO conclusion rather than change it.
+
+Net: the cache-clear is the one genuine new driver-side lever (small frames only); real
+content (≥512) remains the below-MMIO partial decode of §5. These are gated, default-off
+probes in the tree.
+
 ## 6. The question
 
 Is there a one-time device / session setup the vendor stack performs through its
