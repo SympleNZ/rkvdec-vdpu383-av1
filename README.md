@@ -20,7 +20,7 @@ fully-triaged question for the people with the hardware documentation
 (Collabora / the VDPU383 maintainers). See
 [The partial-decode bug](#the-partial-decode-bug-the-open-question).
 
-> Status as of 2026-06-08. Independent development on the RK3576 VDPU383, sibling
+> Status as of 2026-06-09. Independent development on the RK3576 VDPU383, sibling
 > of [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — same
 > SoC, same source tree, same downstream-first approach.
 
@@ -49,6 +49,14 @@ register interface corrupts every frame.**
 ---
 
 ## The partial-decode bug (the open question)
+
+> **Latest (2026-06-09, [`PARTIAL_DECODE_BUG.md` §8](docs/PARTIAL_DECODE_BUG.md)):** an IOMMU
+> fault-probe confirms the HW **writes** the slot-4 intra above-row context (it is produced, not
+> skipped). The surviving top portion scales with **content, not a fixed row count** — within
+> one content it is a roughly fixed *fraction* across resolutions (Sintel ~65% at 360/720/1080),
+> but across content it ranges from ~38% (all-intra vector) to **0% (Big Buck Bunny 1080p/4K,
+> fully blank)** — ruling out a simple fixed-size "caps N rows" buffer and pointing at a
+> content-driven internal-state exhaustion. Still below the MMIO interface.
 
 **Symptom.** Decoding the all-intra conformance vector
 `av1-1-b8-02-allintra_20201006.ivf` (352×288, 4:2:0 8-bit), the **top ~38 % of

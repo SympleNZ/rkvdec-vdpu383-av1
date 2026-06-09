@@ -200,3 +200,47 @@ decode the all-intra vector, inspect the per-row luma signature (rows 0–~96 re
 same `.ivf` with `mpi_dec_test -t 16777224`, and diff `global_cfg.dat`,
 `cdf_rd_def.dat`, `regs_full.dat`, and `stream_in.dat` against the kernel-side
 dumps.
+
+## 8. Update 2026-06-09 — slot-4 is HW-written (bus-confirmed); failure scales with content, not a fixed row count
+
+### 8.1 IOMMU fault-probe: the HW *writes* the intra above-row context
+The §4/§5c open question ("does the HW write slot-4, or only read it?") is now answered at
+the bus level. Pointing slot-4 (`reg148`, `RCB_INTRA_IN_ROW`) at a deliberately **unmapped
+IOVA sentinel** and reading the `rk_iommu` fault address+type during one decode:
+
+```
+slot-4 (reg148):  91 faults, ALL type=WRITE, 64-byte stride (0xdead0000, 0x40, 0x80, …)
+```
+
+So the HW **does write** the above-row context as it decodes the top rows — the buffer is
+produced, not skipped. The complementary question (does it *read* it back for the lower SB
+rows?) is **confounded** by the technique: slot-4 is a write-first buffer, so the first
+write-fault wedges the decode (D-state, unrecoverable on AV1) before any lower-row read can
+occur. The unmapped-sentinel fault probe is clean for read-only buffers (it worked cleanly on
+the VP9 reference legs — see the sibling VP9 repo) but self-defeating for write-first RCB
+buffers.
+
+### 8.2 The partial onset scales with *content*, not a fixed row count
+Decoding a same-content resolution ladder (Sintel AV1, 1-frame clips) and measuring the
+flat-onset SB-row via per-row luma variance (reference-free — a dav1d MAE compare is confounded
+by the HW's SB-padded output stride):
+
+| clip | resolution | SB-rows | real top rows | surviving |
+|---|---|---|---|---|
+| Sintel | 640×273  | 5  | 3 | ~70% |
+| Sintel | 1280×545 | 9  | 6 | ~70% |
+| Sintel | 1920×818 | 13 | 8 | ~63% |
+
+Within one content the surviving portion is a roughly **fixed *fraction*** across resolutions —
+**not** a fixed absolute row count. Across *different* content it varies widely: the 352×288
+all-intra vector ~38% real, Sintel ~65%, and **Big Buck Bunny at 1080p/4K decodes to 0% (a
+fully blank/uniform frame)**. So **content is the dominant variable, resolution is secondary**.
+This rules out the simplest "a fixed-size buffer caps N rows" explanation (that would give a
+content-independent fixed row count); it fits an accumulating per-frame state / resource whose
+exhaustion tracks decode complexity — consistent with the §4 conclusion that slot-4 *size* is
+not the cause. (Note: a prior "MAE 97.6" figure for the 1080p clip was a blank-vs-reference
+distance, i.e. the 0%-surviving case, not a partial.)
+
+Net: slot-4 is HW-written and the failure is a content-driven, fraction-preserving collapse of
+the lower rows — still below the MMIO interface (every programmable input matches MPP; §5).
+The §6 ask is unchanged.
