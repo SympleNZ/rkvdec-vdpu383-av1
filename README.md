@@ -9,7 +9,8 @@ the default CDF tables, reference/DPB management, RCB/SRAM allocation, OBU strea
 framing, and the complete register file.
 
 **One outstanding bug** blocks correct output: a **partial / regional decode** —
-the top of each frame reconstructs correctly and the rest falls back to flat DC.
+a top portion of each frame reconstructs correctly and the rest falls back to flat
+DC (the surviving fraction is content-dependent; some content reconstructs nothing).
 We have triaged it exhaustively and shown it lives **below the MMIO register
 interface**: every programmable input matches MPP, the same silicon decodes the
 same stream correctly under MPP, yet our V4L2 stack's output is partial. This is
@@ -58,15 +59,19 @@ register interface corrupts every frame.**
 > fully blank)** — ruling out a simple fixed-size "caps N rows" buffer and pointing at a
 > content-driven internal-state exhaustion. Still below the MMIO interface.
 
-**Symptom.** Decoding the all-intra conformance vector
-`av1-1-b8-02-allintra_20201006.ivf` (352×288, 4:2:0 8-bit), the **top ~38 % of
-rows reconstruct correctly** and the remainder is flat AV1 **DC intra-prediction
-fallback** (a near-constant fill). PSNR ≈ 11 dB; 0/13 Chromium 8-bit conformance
-vectors are bit-exact. KEY and INTER frames show the identical pattern. It is not
-"HW stops early" — prefilling the output buffer and observing >99.9 % overwrite
-shows HW writes the whole frame, but the **intra above-row prediction context for
-super-block row ≥ 1 is wrong**, so lower rows predict from garbage and collapse
-to DC.
+**Symptom.** The decode is **partial**: a top band of super-block rows
+reconstructs correctly, then the remainder falls back to flat AV1 **DC
+intra-prediction fallback** (a near-constant fill). The surviving fraction is
+**content-dependent** (see the *Latest* note above): on the all-intra conformance
+vector `av1-1-b8-02-allintra_20201006.ivf` (352×288, 4:2:0 8-bit) the **top ~38 %**
+reconstructs (rows 0–~96) and rows ~128+ are flat; the same-content Sintel ladder
+keeps ~⅔ of rows at 360p/720p/1080p; Big Buck Bunny at 1080p/4K reconstructs
+**nothing** (fully blank). PSNR ≈ 11 dB on the all-intra vector; 0/13 Chromium
+8-bit conformance vectors are bit-exact; KEY and INTER frames show the same
+pattern. It is **not** "HW stops early" — prefilling the output buffer and seeing
+>99.9 % overwrite (and the IOMMU write-trace in §8) shows the HW writes the whole
+frame; rather, the super-block rows below a content-dependent onset lose valid
+intra above-row prediction context and collapse to DC.
 
 **What makes this a hardware-level question:** every input we can program or feed
 the IP now **matches the known-good MPP backend**, verified by byte-level
