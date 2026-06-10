@@ -1,8 +1,35 @@
 # The AV1 partial-decode bug — full triage
 
 VDPU383 (RK3576) V4L2 stateless AV1. Every above-MMIO input matches the vendor
-MPP backend, yet our driver's output is a partial frame while MPP decodes the
-same vector correctly on the same silicon. This document is the evidence trail.
+MPP backend, yet our driver's output is wrong while MPP decodes the same vector
+correctly on the same silicon. This document is the evidence trail.
+
+## 0. Update 2026-06-10 — re-characterised as non-deterministic; proven HW-internal
+
+A deep follow-up sharpened the symptom and proved the location. **The "partial / top-38%-of-rows"
+description below was one snapshot of a non-stationary failure.** The current characterisation:
+
+- **It is non-deterministic, ~50% per decode.** Using the HW-adapted CDF write-back CRC as a
+  deterministic signal (gated `av1_adapt_dump`), the same single frame from fresh state decodes to
+  the **correct** CDF about half the time, otherwise to one of: a **wrong** reconstruction (clean
+  DEC_RDY completion, wrong CDF) or a **silent hang** (HW asserts `status=0` indefinitely → IRQ
+  storm → core-timeout, no CDF written). Resolution-dependent (small frames jitter, 1080p/4K blank).
+- **Proven NOT the register file (on-hardware).** Per-decode read-back of the full HW register
+  state, correlated with outcome: control/parameter registers are **byte-identical run-to-run
+  regardless of CORRECT vs WRONG** (a fixed CRC); RCB slot-4 (the intra above-row context) is at a
+  fixed address; CDF buffer addresses vary but the **same address produced both a correct and a
+  wrong decode**. The non-determinism is below everything we program or allocate.
+- **All three software layers walked, all negative:** HAL/register file; the per-codec kernel
+  driver (~20 levers, incl. cache attributes, TLB flush, reg-bit/mode permutations, warmup,
+  kick barriers, the BSP link-descriptor "error-mode flag" `WAIT_RESET_EN`, power-cycle, clocks);
+  and the core MPP **service** layer (`mpp_service`/`mpp_iommu`: full IOMMU hardware refresh
+  `rockchip_iommu_disable+enable` equivalent, and the cached-dma-buf buffer model — making the CDF
+  input cacheable like MPP). None change the ~50% rate.
+
+**Conclusion:** the defect is un-primed internal VDPU383 state with **no trace** in any register,
+buffer, IOMMU op, or memory attribute reachable from a V4L2 driver — the same *class* as the H.264
+deblock bug (fixed by a power-up warmup), but reached by no warmup or software lever we have found.
+The register-level evidence below stands; this update supersedes the static "partial decode" framing.
 
 ## 1. Symptom
 

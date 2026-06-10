@@ -21,9 +21,36 @@ fully-triaged question for the people with the hardware documentation
 (Collabora / the VDPU383 maintainers). See
 [The partial-decode bug](#the-partial-decode-bug-the-open-question).
 
-> Status as of 2026-06-09. Independent development on the RK3576 VDPU383, sibling
+> Status as of 2026-06-10. Independent development on the RK3576 VDPU383, sibling
 > of [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — same
 > SoC, same source tree, same downstream-first approach.
+
+---
+
+## ★ Update 2026-06-10 — re-characterised as ~50% non-deterministic; proven HW-internal
+
+A deep follow-up session **sharpened the bug and proved its location:**
+
+- **Re-characterised: it is non-deterministic, not a fixed "partial decode."** The same single
+  frame, fresh state, decodes **correctly ~50% of the time**; otherwise it lands in a wrong
+  reconstruction *or* a silent HW hang (IRQ storm + core-timeout). The failure is also
+  **resolution-dependent** (small frames jitter; 1080p/4K go blank). The earlier "top ~38% of
+  rows" framing was one snapshot of a non-stationary, non-deterministic failure.
+- **Proven HW-internal — NOT the register file.** Per-decode HW register read-back correlated
+  with outcome: the control/parameter registers are **byte-identical run-to-run regardless of
+  CORRECT vs WRONG**, and the buffer addresses don't determine the outcome (the same address
+  produced both). The non-determinism is below everything we program or allocate.
+- **Software, not silicon:** the vendor MPP stack decodes the same vectors correctly on the same
+  SoC; ours doesn't.
+- **All three software layers walked, all negative:** HAL/register file (byte-identical), the
+  per-codec kernel driver (~20 levers), and the core MPP **service** layer (`mpp_service`/
+  `mpp_iommu`: full IOMMU hardware refresh and the cached-dma-buf buffer model). The deterministic
+  signal used throughout is the HW-adapted CDF write-back CRC (a gated `av1_adapt_dump` probe).
+
+**Net:** the open question is now backed by an exhaustive, layer-by-layer negative result — it is
+un-primed internal VDPU383 state (the same *class* as the H.264 deblock bug that was fixed with a
+power-up warmup, but reachable by no warmup or software lever we have found). See
+`docs/PARTIAL_DECODE_BUG.md`.
 
 ---
 
