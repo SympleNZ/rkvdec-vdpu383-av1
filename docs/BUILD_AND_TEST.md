@@ -19,29 +19,23 @@ v4l2-ctl -d /dev/video-dec0 --list-formats-out   # expect AV1F (and S264/S265)
 > The board may auto-load an installed `rockchip-vdec.ko` at boot; always `rmmod`
 > then `insmod` this build to be sure you are testing it.
 
-## Decode the all-intra conformance vector
+## Decode the all-intra conformance vector (several times)
 
 ```sh
-gst-launch-1.0 -q \
-  filesrc location=av1-1-b8-02-allintra_20201006.ivf ! ivfparse ! av1parse ! \
-  v4l2slav1dec ! videoconvert ! video/x-raw,format=I420 ! filesink location=out.yuv
+for i in 1 2 3 4 5 6; do
+  rmmod rockchip_vdec; insmod src/rockchip-vdec.ko   # fresh state each run
+  gst-launch-1.0 -q \
+    filesrc location=av1-1-b8-02-allintra_20201006.ivf ! ivfparse ! av1parse ! \
+    v4l2slav1dec ! videoconvert ! video/x-raw,format=I420 ! filesink location=out$i.yuv
+done
+md5sum out*.yuv     # compare to each other and to the dav1d reference
 ```
 
-Per-row luma signature of frame 0 (352×288) — rows 0–~96 reconstruct, 128+ are
-flat DC fill (the bug):
-
-```python
-import collections
-W,H = 352,288
-y = open("out.yuv","rb").read(W*H)
-for r in (0,32,64,96,128,192,256):
-    row = y[r*W:(r+1)*W]; c = collections.Counter(row)
-    v,n = c.most_common(1)[0]
-    print(f"row {r:3d}: unique={len(c):3d} top=0x{v:02x}")
-```
-
-`gst` returns 0 and writes a full-size YUV; the partial decode is in the content,
-not the framing.
+The decode is **non-deterministic**: about half the runs are correct (byte-exact
+to dav1d), the rest land in a discrete wrong or silent state. `gst` returns 0 and
+writes a full-size YUV every time; the defect is in the content, not the framing,
+and it varies run-to-run. (The dav1d reference: `ffmpeg -i
+av1-1-b8-02-allintra_20201006.ivf -pix_fmt yuv420p ref.yuv`.)
 
 ## MPP ground-truth cross-dumps (on an RK3576 BSP board)
 
@@ -62,7 +56,9 @@ scanner) accompany the development notes for this driver.
 
 ## What to look at
 
-The actionable evidence is in [`PARTIAL_DECODE_BUG.md`](PARTIAL_DECODE_BUG.md):
-GBL, CDF, the register file, and the bitstream are all byte-identical to MPP, and
-the RCB slot-4 theory is falsified — so the divergence is below the MMIO
+The actionable evidence is in [`NONDETERMINISM_BUG.md`](NONDETERMINISM_BUG.md):
+GBL, CDF, the register file, and the bitstream are all byte-identical to MPP; the
+per-decode register read-back is identical regardless of outcome; the bug survives
+masking all interrupts; and MPP decodes the clip 39/39 byte-exact and
+deterministically on the same silicon — so the divergence is below the MMIO
 interface.

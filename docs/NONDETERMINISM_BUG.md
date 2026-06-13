@@ -1,0 +1,172 @@
+# The AV1 decode non-determinism bug — full triage
+
+VDPU383 (RK3576) V4L2 stateless AV1. Every above-MMIO input matches the vendor
+MPP backend, yet our driver's output is wrong — and, critically, **wrong
+non-deterministically**: the same frame from fresh state decodes correctly about
+half the time and otherwise lands in one of a few discrete wrong states. MPP
+decodes the same stream byte-exact on the same silicon. This document is the
+evidence trail.
+
+> **History / correction (2026-06-13).** Earlier revisions of this repo described
+> this as a *deterministic partial decode* ("the top ~38 % of rows reconstruct,
+> the rest is flat DC fallback"). **That framing was incomplete and is corrected
+> here.** The deterministic top-band/DC signature was one snapshot of the *wrong*
+> outcome; the actual behaviour is **per-decode non-determinism** — the same KEY
+> frame, decoded repeatedly from fresh state, produces a *correct* result roughly
+> half the time and a *different* wrong (or silent) result the rest of the time.
+> The doc was also corrected on a second point: a once-promising **RCB SRAM-vs-DRAM
+> placement** lever was **refuted** (§5). The "below-MMIO" conclusion is unchanged
+> and is now established more strongly (§3, §4).
+
+## 1. Symptom — per-decode non-determinism
+
+Test vector: `av1-1-b8-02-allintra_20201006.ivf` — 352×288, 4:2:0, 8-bit,
+all-intra, a single KEY frame. Decoded repeatedly from fresh module/session state,
+the same frame settles into one of a few discrete outcomes:
+
+| Outcome | ~rate | adapted CDF write-back | HW status | notes |
+|---|---|---|---|---|
+| **CORRECT** | ~50–75 % | the dominant correct value | clean DEC_RDY (`sta=0x1`) | byte-exact |
+| **WRONG** | ~20–40 % | a discrete wrong attractor (a few recurring values, sometimes unique per run) | clean DEC_RDY, **no error bits** | reconstruction diverges |
+| **SILENT** | ~10–30 % | `0` — no CDF written back at all | self-cleared `dec_en`, no IRQ | HW "completes" but writes no adapted state |
+
+The rate is non-stationary across a session (it can degrade toward more-frequent
+silent/wrong as a session runs, then recover). Within a fresh decode the outcome
+is a coin-flip: **same input bytes + clean completion → one of several discrete
+states.** When wrong, the spatial manifestation varies (a degraded/wrong
+reconstruction; the old "top band correct, lower rows collapse to DC" was one such
+manifestation, not a fixed signature).
+
+**It is not "HW stops early."** Prefilling the output buffer with a sentinel and
+decoding shows it fully overwritten — the HW writes a complete frame; it is the
+reconstruction that is wrong/non-deterministic.
+
+## 2. Decode completion is solved (and a NULL-deref had to be fixed first)
+
+The VDPU383 frequently finishes a decode, self-clears `DEC_ENABLE`, and never
+raises the completion IRQ ("silent completion"). A watchdog that reads
+`LINK_STA_INT` / `DEC_ENABLE` and treats a self-cleared `dec_en` as DONE lets AV1
+complete without a D-state hang.
+
+Note: in this downstream tree the watchdog's VP9 link-mode silent-completion
+telemetry dereferences `ctx->link_table`, which is NULL in single-shot mode (AV1)
+→ watchdog-worker oops → D-state hang on the first decode. The NULL-guard fix is
+in `src/rkvdec.c` (`rkvdec_watchdog_func`). Without it, AV1 does not decode at
+all. (The watchdog makes decode *complete*; it does not affect the non-determinism
+— see §4, where the bug survives masking all interrupts entirely.)
+
+## 3. What was proven equal to MPP, and that MPP is correct
+
+All dumps captured with MPP's `DUMP_VDPU38X_DATAS` on an RK3576 BSP board
+(`mpi_dec_test -t 16777224`), against our kernel-side dumps on the mainline V4L2
+board, for the same frame.
+
+### 3.1 Every above-MMIO input is byte-identical to MPP
+- **Global header (GBL)** — the ~2900-bit packed AV1 uncompressed frame header
+  (`global_cfg.dat`) matches MPP byte-for-byte (all frame-header features: CDEF /
+  LF / LR / segmentation / global-motion / superres / delta-q / colour config /
+  film-grain params).
+- **Default CDF** — `av1_default_cdf` == MPP `cdf_rd_def.dat`.
+- **Register file** — of 171 common registers, the only differences are benign
+  (`reg13` timeout) or incomparable (resolved IOVA vs MPP fd+offset); `reg8`
+  dec_mode=4, `reg9`, stream framing (`reg65/66/67`), strides, ref strides all
+  match.
+- **Bitstream** — our synthesised `[TD][OBU_FRAME][LEB][body]` body matches MPP's
+  FRAME body byte-for-byte; adding the SEQ_HDR OBU to match MPP exactly changes
+  nothing.
+
+### 3.2 MPP decodes it correctly — verified at output level
+On the BSP board, `mpi_dec_test` decodes the full 39-frame `allintra` clip
+**byte-identical to the dav1d software reference — 39/39 frames, identical md5
+across repeated runs, fully deterministic, no decoder wedge.** So the silicon
+decodes this stream correctly and deterministically under the vendor stack; the
+defect is in our software path, reachable in principle. (Vendor decode *time*
+varied 40→146 ms across the identical runs — incidental cache-warmth timing
+jitter, decoupled from correctness.)
+
+## 4. It is HW-internal, below everything we program — proven, not assumed
+
+Two on-hardware results place the non-determinism below the register/MMIO and
+below any CPU activity we perform during the decode:
+
+- **Per-decode register read-back is identical regardless of outcome.** Reading
+  back the full control/parameter register file immediately before each kick and
+  CRC-ing it: the CRC is **byte-identical run-to-run across CORRECT, WRONG, and
+  SILENT decodes.** Our register programming is provably deterministic and is not
+  the source; RCB slot-4 sits at a fixed address every run; the CDF buffer address
+  does not predict the outcome (the same address produced both a correct and a
+  wrong decode).
+- **It survives masking all link interrupts.** Gating off the INT_EN arming so the
+  decode runs with **zero CPU↔HW MMIO between the kick and the watchdog reap**
+  leaves the outcome distribution unchanged. So nothing the driver does mid-decode
+  (IRQ handling, status acks, re-arms) drives it. (Side observations: the IRQ line
+  fires regardless of INT_EN on this IP; SILENT decodes latch an early `0x2`
+  line-event the correct ones do not.)
+
+So the same input, same register file, same buffers, with no CPU in the loop,
+settles into one of a few discrete states — an un-primed/metastable **internal**
+decoder state sampled at decode start.
+
+## 5. The RCB SRAM-vs-DRAM placement lever — REFUTED
+
+An earlier revision reported RCB placement as a promising lever below the register
+interface: the vendor `mpp_set_rcbbuf()` rewrites the RCB base registers in-kernel
+at submit (invisible to the HAL register dump), the BSP board's DT has no
+`rcb-iova` so MPP decodes with **DRAM** RCB while our mainline driver uses **SRAM**
+RCB, and an early experiment appeared to show a super-block row reconstructing
+under DRAM that was fill under SRAM.
+
+**That result did not hold up.** A controlled per-region SRAM-vs-DRAM A/B (forcing
+the intra-above-row context and other high-priority RCB regions into each) gave a
+**byte-identical failing outcome** (AV1 1080p partial MAE 97.6 = 97.6 SRAM vs
+DRAM). The earlier "DRAM reconstructed the row" observation was a **first-decode
+artifact of the very non-determinism in §1**, not a placement effect. RCB
+placement does **not** fix or move the bug. (The RCB **slot-4** intra-above-row
+sizing theory was independently falsified earlier: programming MPP's exact slot-4
+length changes nothing, and the buffer is HW-written/HW-read within a
+correctly-based, adequately-sized region.) Cache-attribute variants of the same
+idea (cached RCB + per-frame `dma_sync`, the `dma-buf-cache` model) were also
+tested and are negative.
+
+## 6. Conclusion — a shared internal-state class with the sibling bugs
+
+Every programmable input matches MPP, MPP decodes the vector byte-exact and
+deterministically on the same silicon, and the failure survives both an identical
+register file and the removal of all mid-decode CPU activity. The divergence is an
+**un-primed / metastable internal decoder state**, below the MMIO interface, that
+the vendor submit path pins and a mainline V4L2 m2m client does not.
+
+This is the same class as the other VDPU383 V4L2 findings:
+- **H.264** deblock race — fixed, and the fix is instructive: it was a **power-up
+  warmup decode at device probe**, an init/lifecycle operation invisible to any
+  per-frame register diff. The same "prime an internal state outside the per-frame
+  path" shape may apply here.
+- **VP9** small-footprint reference bypass (sibling repo) — small-MC-footprint
+  inter frames reconstruct from a *retained internal copy of the most-recent
+  reference* (seeded by the immediately-preceding decode) instead of the
+  programmed reference; also VP9-specific, also address/cache-invariant.
+- **AV1** decode non-determinism (this bug).
+
+The common thread is an internal per-frame context / reference-retention block
+whose initialisation is not deterministic from the V4L2 side. A shared root is a
+hypothesis, not proven.
+
+## 7. The question
+
+What does the vendor stack do — at device/session init through `mpp_service`, or
+in the submit path — that **pins the VDPU383's internal entropy/context state so
+an AV1 KEY frame decodes deterministically**, which a mainline V4L2 m2m client
+does not, given the per-frame register file, GBL, CDF, and bitstream are all
+byte-identical and the result is independent of our register programming and of
+all mid-decode CPU activity? A pointer to the relevant IP state or init sequence
+would unblock this.
+
+## 8. Reproduce
+
+See [`BUILD_AND_TEST.md`](BUILD_AND_TEST.md). In short: build `src/`, insmod,
+decode the all-intra vector **several times from fresh state**, and compare each
+output to the dav1d reference (and to each other) — the result varies run-to-run
+between correct and a discrete wrong/silent state. MPP cross-dumps: build MPP with
+`DUMP_VDPU38X_DATAS`, decode the same `.ivf` with `mpi_dec_test -t 16777224`, and
+diff `global_cfg.dat`, `cdf_rd_def.dat`, `regs_full.dat`, and `stream_in.dat`
+against the kernel-side dumps (all byte-identical).

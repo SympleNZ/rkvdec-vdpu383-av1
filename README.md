@@ -8,49 +8,31 @@ software side controls is implemented and **byte-identical to the vendor library
 the default CDF tables, reference/DPB management, RCB/SRAM allocation, OBU stream
 framing, and the complete register file.
 
-**One outstanding bug** blocks correct output: a **partial / regional decode** —
-a top portion of each frame reconstructs correctly and the rest falls back to flat
-DC (the surviving fraction is content-dependent; some content reconstructs nothing).
-We have triaged it exhaustively and shown it lives **below the MMIO register
-interface**: every programmable input matches MPP, the same silicon decodes the
-same stream correctly under MPP, yet our V4L2 stack's output is partial. This is
-a hardware-execution-level question we cannot resolve from the driver side.
+**One outstanding bug** blocks correct output: the decode is
+**non-deterministic** — the same frame from fresh state decodes correctly about
+half the time and otherwise lands in one of a few discrete wrong (or silent)
+states, always with a clean completion status. We have triaged it exhaustively and
+shown it lives **below the MMIO register interface**: every programmable input
+matches MPP, the same silicon decodes the same stream correctly *and
+deterministically* under MPP, and the non-determinism survives both an identical
+register file and the removal of all CPU activity during the decode. This is a
+hardware-execution-level question we cannot resolve from the driver side.
 
 This repo is published **downstream-first**: working code plus a precise,
 fully-triaged question for the people with the hardware documentation
 (Collabora / the VDPU383 maintainers). See
-[The partial-decode bug](#the-partial-decode-bug-the-open-question).
+[The decode-non-determinism bug](#the-decode-non-determinism-bug-the-open-question).
 
-> Status as of 2026-06-10. Independent development on the RK3576 VDPU383, sibling
+> Status as of 2026-06-13. Independent development on the RK3576 VDPU383, sibling
 > of [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — same
 > SoC, same source tree, same downstream-first approach.
-
----
-
-## ★ Update 2026-06-10 — re-characterised as ~50% non-deterministic; proven HW-internal
-
-A deep follow-up session **sharpened the bug and proved its location:**
-
-- **Re-characterised: it is non-deterministic, not a fixed "partial decode."** The same single
-  frame, fresh state, decodes **correctly ~50% of the time**; otherwise it lands in a wrong
-  reconstruction *or* a silent HW hang (IRQ storm + core-timeout). The failure is also
-  **resolution-dependent** (small frames jitter; 1080p/4K go blank). The earlier "top ~38% of
-  rows" framing was one snapshot of a non-stationary, non-deterministic failure.
-- **Proven HW-internal — NOT the register file.** Per-decode HW register read-back correlated
-  with outcome: the control/parameter registers are **byte-identical run-to-run regardless of
-  CORRECT vs WRONG**, and the buffer addresses don't determine the outcome (the same address
-  produced both). The non-determinism is below everything we program or allocate.
-- **Software, not silicon:** the vendor MPP stack decodes the same vectors correctly on the same
-  SoC; ours doesn't.
-- **All three software layers walked, all negative:** HAL/register file (byte-identical), the
-  per-codec kernel driver (~20 levers), and the core MPP **service** layer (`mpp_service`/
-  `mpp_iommu`: full IOMMU hardware refresh and the cached-dma-buf buffer model). The deterministic
-  signal used throughout is the HW-adapted CDF write-back CRC (a gated `av1_adapt_dump` probe).
-
-**Net:** the open question is now backed by an exhaustive, layer-by-layer negative result — it is
-un-primed internal VDPU383 state (the same *class* as the H.264 deblock bug that was fixed with a
-power-up warmup, but reachable by no warmup or software lever we have found). See
-`docs/PARTIAL_DECODE_BUG.md`.
+>
+> **Correction (2026-06-13):** earlier revisions framed the bug as a *deterministic
+> partial decode* ("top ~38 % of rows reconstruct, rest flat DC"). That was one
+> snapshot of the wrong outcome; the actual behaviour is **per-decode
+> non-determinism** (correct ~half the time, otherwise a discrete wrong/silent
+> state). A once-promising **RCB SRAM-vs-DRAM placement** lever was also
+> **refuted**. See [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
 
 ---
 
@@ -65,45 +47,35 @@ power-up warmup, but reachable by no warmup or software lever we have found). Se
 | Register file (ctrl / codec-params / address regs) | ✅ matches MPP (only addresses + benign fields differ) |
 | Decode completion (silent-completion watchdog) | ✅ reliable — every frame completes, no hangs/faults |
 | References / DPB / colmv, tiles, KEY + INTER frame types | ✅ implemented |
-| **Output correctness** | ❌ **partial / regional decode — the open bug (every frame)** |
+| **Output correctness** | ❌ **non-deterministic — the open bug (correct ~half the time)** |
 | 10-bit output (P010) | ❌ HW downscales 10→8; P010 not wired (V2) |
 | Film-grain synthesis (params packed; FGS apply path) | ⚠️ unvalidated (gated behind the core bug) |
 | Mid-stream resolution change (V4L2 `source_change`) | ❌ not handled (V2) |
 
 The driver is, in effect, **feature-complete and MPP-faithful on everything the
-V4L2 stack controls — but produces no usable output because one defect below the
-register interface corrupts every frame.**
+V4L2 stack controls — but produces unreliable output because one defect below the
+register interface makes the decode non-deterministic.**
 
 ---
 
-## The partial-decode bug (the open question)
+## The decode-non-determinism bug (the open question)
 
-> **Latest (2026-06-09, [`PARTIAL_DECODE_BUG.md` §8](docs/PARTIAL_DECODE_BUG.md)):** an IOMMU
-> fault-probe confirms the HW **writes** the slot-4 intra above-row context (it is produced, not
-> skipped). The surviving top portion scales with **content, not a fixed row count** — within
-> one content it is a roughly fixed *fraction* across resolutions (Sintel ~65% at 360/720/1080),
-> but across content it ranges from ~38% (all-intra vector) to **0% (Big Buck Bunny 1080p/4K,
-> fully blank)** — ruling out a simple fixed-size "caps N rows" buffer and pointing at a
-> content-driven internal-state exhaustion. Still below the MMIO interface.
-
-**Symptom.** The decode is **partial**: a top band of super-block rows
-reconstructs correctly, then the remainder falls back to flat AV1 **DC
-intra-prediction fallback** (a near-constant fill). The surviving fraction is
-**content-dependent** (see the *Latest* note above): on the all-intra conformance
-vector `av1-1-b8-02-allintra_20201006.ivf` (352×288, 4:2:0 8-bit) the **top ~38 %**
-reconstructs (rows 0–~96) and rows ~128+ are flat; the same-content Sintel ladder
-keeps ~⅔ of rows at 360p/720p/1080p; Big Buck Bunny at 1080p/4K reconstructs
-**nothing** (fully blank). PSNR ≈ 11 dB on the all-intra vector; 0/13 Chromium
-8-bit conformance vectors are bit-exact; KEY and INTER frames show the same
-pattern. It is **not** "HW stops early" — prefilling the output buffer and seeing
->99.9 % overwrite (and the IOMMU write-trace in §8) shows the HW writes the whole
-frame; rather, the super-block rows below a content-dependent onset lose valid
-intra above-row prediction context and collapse to DC.
+**Symptom.** Decoding the all-intra conformance vector
+`av1-1-b8-02-allintra_20201006.ivf` (352×288, 4:2:0 8-bit, a single KEY frame)
+**repeatedly from fresh state**, the same frame settles into one of a few discrete
+outcomes: **CORRECT** (~half the runs), **WRONG** (a discrete wrong reconstruction,
+clean DEC_RDY, no error bits), or **SILENT** (the HW self-clears `dec_en` and
+writes no adapted CDF). Same input bytes + clean completion → a coin-flip between
+several discrete states. When wrong, the spatial manifestation varies (a degraded
+reconstruction; the old "top band correct, lower rows flat DC" was one such
+manifestation, not a fixed signature). It is not "HW stops early" — a sentinel
+prefill of the output buffer is fully overwritten, so the HW writes a complete
+frame; the reconstruction is what varies.
 
 **What makes this a hardware-level question:** every input we can program or feed
-the IP now **matches the known-good MPP backend**, verified by byte-level
-cross-dumps on the BSP, yet the same silicon produces a partial frame under our
-V4L2 driver while decoding the vector correctly under MPP:
+the IP **matches the known-good MPP backend** (byte-level BSP cross-dumps), and MPP
+decodes the clip **39/39 frames byte-identical to the dav1d reference,
+deterministically, on the same silicon** — yet our V4L2 path is non-deterministic.
 
 | Above-MMIO input | vs MPP | how verified |
 |---|---|---|
@@ -114,42 +86,37 @@ V4L2 driver while decoding the vector correctly under MPP:
 | RCB slot sizes / layout (incl. slot-4 intra context) | over-allocated but benign | `vdpu383_av1d_rcb_calc` dump; A/B override = no change |
 | Bitstream (TD + SEQ_HDR + FRAME + body) | byte-identical | OBU decode of `stream_in.dat` vs our `strm_scratch` |
 
-We also falsified the previously-leading theory that the RCB **slot-4** intra
-above-row context buffer was the cause: a RAM redirect of slot 4 hangs the IP
-(SRAM-only access path), and programming MPP's exact slot-4 length changes
-nothing. The full triage — including the register diff, the RCB sizing analysis,
-and the stream byte-comparison — is in
-[`docs/PARTIAL_DECODE_BUG.md`](docs/PARTIAL_DECODE_BUG.md).
+Two on-hardware results put the bug **below everything we program and below any
+CPU activity during the decode**:
 
-**Conclusion.** This is the same below-MMIO class as the VP9 compound-prediction
-collapse (still open) and the H.264 deblock race — which we have since **fixed**
-(an RK3576 power-up warmup at `pm_runtime` resume; 64/64 bit-exact), showing this
-class can be unblocked from outside per-frame register programming:
-*registers/headers/CDF/stream all match MPP, the hardware differs anyway.* The
-remaining variable is the IP's internal intra above-row-context state machine, or
-a HW-session/context setup MPP performs through its `mpp_service` kernel path that
-has no V4L2 register equivalent — below the MMIO interface, where the driver has
-no visibility.
+- **Per-decode register read-back is byte-identical regardless of outcome** — the
+  full control/parameter register file, CRC'd just before each kick, is the same
+  on CORRECT, WRONG, and SILENT runs. Our programming is provably deterministic and
+  is not the source; the CDF buffer address does not predict the outcome.
+- **It survives masking all link interrupts** — running the decode with zero CPU↔HW
+  MMIO between kick and reap leaves the outcome distribution unchanged. Nothing the
+  driver does mid-decode drives it.
 
-**A lever was found below the register interface (RCB placement).** Reading the
-Rockchip BSP kernel driver (`mpp_rkvdec2.c`) shows `mpp_set_rcbbuf()` **rewrites the
-RCB base registers in the kernel at submit time** — pointing them at SRAM only when
-the DT wires `rockchip,rcb-iova` and the frame is wider than `rcb_min_width`,
-otherwise leaving RCB in **DRAM**. The BSP board's DT has no `rcb-iova`, so the
-working MPP stack decodes with **DRAM RCB** — and because that rewrite happens in the
-kernel *after* the HAL register dump, it is invisible to the `regs_full.dat` diff
-above. Our mainline V4L2 driver always uses **SRAM** RCB. Forcing all-DRAM RCB in our
-driver **changed the regional decode pattern** (a super-block row that was fill under
-SRAM reconstructed under DRAM), with a first-decode-vs-subsequent state dependence.
-So the failure is **sensitive to RCB intra-above-row buffer placement and state** —
-i.e. partly in our control — though neither SRAM nor DRAM alone yields a correct
-frame, consistent with a HW-internal above-row read-after-write path difference.
+We also **refuted** the previously-promising RCB SRAM-vs-DRAM placement lever (a
+controlled per-region A/B is byte-identical SRAM vs DRAM; the earlier "DRAM
+reconstructed a row" was a first-decode artifact of this very non-determinism), and
+falsified the RCB **slot-4** intra-above-row theory. Full triage in
+[`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
 
-**The question for someone with the VDPU383 docs:** what is the RCB intra-above-row
-buffer contract the vendor stack relies on (placement / coherency / the in-kernel
-base rewrite) that arms the VDPU383 above-row-context reconstruction across
-super-block rows, which a mainline V4L2 m2m client doesn't replicate? Even a
-"look at X" would unblock it.
+**Conclusion.** This is the same class as the other VDPU383 V4L2 findings — the
+H.264 deblock race (**fixed**, by a power-up warmup decode at probe — an init-time
+prime invisible to per-frame diffs) and the VP9 small-footprint reference bypass
+(sibling repo) — *registers/headers/CDF/stream all match MPP, the hardware differs
+anyway.* The remaining variable is an **un-primed / metastable internal decoder
+state** sampled at decode start, which the vendor submit path pins and a mainline
+V4L2 m2m client does not.
+
+**The question for someone with the VDPU383 docs:** what does the vendor stack do —
+at device/session init (`mpp_service`) or in the submit path — that pins the
+VDPU383's internal entropy/context state so an AV1 KEY frame decodes
+deterministically, given the per-frame register file, GBL, CDF, and bitstream are
+all byte-identical and the result is independent of our register programming and of
+all mid-decode CPU activity? Even a "look at X" would unblock it.
 
 ---
 
@@ -218,18 +185,20 @@ sudo insmod src/rockchip-vdec.ko
 v4l2-ctl -d /dev/video-dec0 --list-formats-out   # expect AV1F (and S264/S265)
 ```
 
-Decode the all-intra conformance vector and inspect the per-row signature:
+Decode the all-intra conformance vector **several times from fresh state** and
+compare each output to the dav1d reference (and to each other):
 
 ```sh
 gst-launch-1.0 -q filesrc location=av1-1-b8-02-allintra_20201006.ivf ! \
     ivfparse ! av1parse ! v4l2slav1dec ! videoconvert ! \
     video/x-raw,format=I420 ! filesink location=out.yuv
-# Frame 0 (352x288): rows 0..~96 reconstruct; rows ~128+ are flat DC fill.
+# Frame 0 (352x288): correct on ~half the runs; otherwise a discrete wrong or
+# silent result — the output varies run-to-run (the non-determinism).
 ```
 
 Full reproduction, the MPP cross-dump procedure, and the triage scripts are in
 [`docs/BUILD_AND_TEST.md`](docs/BUILD_AND_TEST.md) and
-[`docs/PARTIAL_DECODE_BUG.md`](docs/PARTIAL_DECODE_BUG.md).
+[`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
 
 ---
 
