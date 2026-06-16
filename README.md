@@ -11,7 +11,10 @@ framing, and the complete register file.
 **One outstanding bug** blocks correct output: the decode is
 **non-deterministic** — the same frame from fresh state decodes correctly about
 half the time and otherwise lands in one of a few discrete wrong (or silent)
-states, always with a clean completion status. We have triaged it exhaustively and
+states, always with a clean completion status. (The correct-rate is
+**non-stationary**: in some sessions the vector lands ~half correct, in others it
+is consistently wrong across many fresh loads — no driver change, a silicon
+baseline drift. So a single reproduction run may show all-wrong.) We have triaged it exhaustively and
 shown it lives **below the MMIO register interface**: every programmable input
 matches MPP, the same silicon decodes the same stream correctly *and
 deterministically* under MPP, and the non-determinism survives both an identical
@@ -47,7 +50,7 @@ fully-triaged question for the people with the hardware documentation
 | Register file (ctrl / codec-params / address regs) | ✅ matches MPP (only addresses + benign fields differ) |
 | Decode completion (silent-completion watchdog) | ✅ reliable — every frame completes, no hangs/faults |
 | References / DPB / colmv, tiles, KEY + INTER frame types | ✅ implemented |
-| **Output correctness** | ❌ **non-deterministic — the open bug (correct ~half the time)** |
+| **Output correctness** | ❌ **non-deterministic — the open bug (correct ~half the time in good runs; rate is non-stationary)** |
 | 10-bit output (P010) | ❌ HW downscales 10→8; P010 not wired (V2) |
 | Film-grain synthesis (params packed; FGS apply path) | ⚠️ unvalidated (gated behind the core bug) |
 | Mid-stream resolution change (V4L2 `source_change`) | ❌ not handled (V2) |
@@ -66,7 +69,12 @@ register interface makes the decode non-deterministic.**
 outcomes: **CORRECT** (~half the runs), **WRONG** (a discrete wrong reconstruction,
 clean DEC_RDY, no error bits), or **SILENT** (the HW self-clears `dec_en` and
 writes no adapted CDF). Same input bytes + clean completion → a coin-flip between
-several discrete states. When wrong, the spatial manifestation varies (a degraded
+several discrete states. The correct-rate is also **non-stationary across longer
+timescales** — the vector decodes ~half correct in some sessions and is
+consistently wrong across many fresh loads in others, with no driver change (a
+silicon baseline drift; thermal / uptime the suspects). Within any one
+module-load the outcome is fixed (see "pinned per module-load" below). When wrong,
+the spatial manifestation varies (a degraded
 reconstruction; the old "top band correct, lower rows flat DC" was one such
 manifestation, not a fixed signature). It is not "HW stops early" — a sentinel
 prefill of the output buffer is fully overwritten, so the HW writes a complete
