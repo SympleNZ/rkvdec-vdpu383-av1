@@ -23,7 +23,7 @@ fully-triaged question for the people with the hardware documentation
 (Collabora / the VDPU383 maintainers). See
 [The decode-non-determinism bug](#the-decode-non-determinism-bug-the-open-question).
 
-> Status as of 2026-06-13. Independent development on the RK3576 VDPU383, sibling
+> Status as of 2026-06-16. Independent development on the RK3576 VDPU383, sibling
 > of [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — same
 > SoC, same source tree, same downstream-first approach.
 >
@@ -104,7 +104,17 @@ CPU activity during the decode**:
 We also **refuted** the RCB lever in both dimensions: enlarging the RCB 2–3×
 (Detlev's "too-small RCB → random results" suggestion) gives **byte-identical**
 output, and SRAM-vs-DRAM placement is byte-identical too — bracketing the
-intra-above-row slot across a ~15× size range with no effect. Full triage in
+intra-above-row slot across a ~15× size range with no effect. We also **probed
+the submission model**: the vendor stack runs AV1 through the link/CCU descriptor
+path (zero per-frame register MMIO) while we run single-shot direct-MMIO, so we
+implemented link/CCU submission for AV1 and A/B-tested it — link mode lands on the
+**same per-load wrong attractors** as single-shot. (Inconclusive — not refuted. A
+code audit then showed that port was not MPP-faithful, so we rebuilt the link path
+to assemble the descriptor directly from the register structs, matching the
+vendor's `rkvdec2_link_prepare`. The hardware **still writes no per-task completion
+status** — and the same holds for VP9 — so the lever is blocked one level deeper,
+on what *arms* the writeback in the enqueue/init sequence. A live MMIO trace or the
+link/CCU docs would settle it.) Full triage in
 [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
 
 **Conclusion.** This is the same class as the other VDPU383 V4L2 findings — the

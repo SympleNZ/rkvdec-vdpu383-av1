@@ -156,6 +156,58 @@ set at init by something *other* than the warmup, below every software knob.
 > not by reading back the adapted CDF / register file — those heavy MMIO read-backs
 > themselves perturb the metastable state and shift the outcome distribution.
 
+## 6.5 The submission model (single-shot vs link/CCU) — tested, INCONCLUSIVE (port not yet MPP-faithful)
+
+A function-order trace of the vendor stack (MPP) on the BSP board showed MPP runs
+AV1 through the VDPU383 **link/CCU descriptor path** — per frame it builds the
+register set into a DMA descriptor the hardware fetches, with *zero* per-frame
+register MMIO — whereas this driver programs the registers by direct MMIO and
+kicks a single-shot decode. Continuous link submission keeps the IP occupied and
+primed across frames; single-shot re-arms it each decode. Since the bug is a
+per-init metastability, the submission model was a well-motivated suspect and the
+one remaining untested *structural* lever.
+
+**Tested by implementing link/CCU submission for AV1** (the same codec-agnostic
+descriptor ring the VP9/H.264 paths use) and running an interleaved A/B battery
+— 6 fresh loads single-shot vs 6 fresh loads link mode (depth-4 continuous), in
+one session to control for the non-stationary regime, classifying each by
+frame-0 pixel md5. Both modes were **0/6 correct**, and — decisively — link mode
+landed on the **identical per-load wrong attractors as single-shot** (the same
+byte-exact reconstructions, e.g. md5 `beaa2fd68e85` and `74d914e75186`, recur in
+both). If the submission model changed the IP's internal metastable state we
+would see a different family of outcomes; instead both reach the same wrong
+results.
+
+**Caveat — the test is not yet definitive.** A subsequent code audit against the
+vendor BSP link driver showed our AV1 link path is **not yet a faithful
+reproduction of MPP's CCU model**: it programs the full register file to MMIO
+(single-shot state) and bolts a descriptor kick on top, so the hardware never
+performs the per-descriptor completion writeback the vendor path relies on
+(it completes *silently*, like single-shot, and our watchdog recovers each frame
+by reset+resend). It also never runs the genuine continuous CCU ring
+(`CCU_WORK_EN`, dynamic node re-stitch, hard-CCU reap are absent). So the A/B
+above effectively compared single-shot against single-shot-with-descriptor-
+overhead — which is consistent with the identical attractors, but means the
+submission model is **not yet excluded**.
+
+**Follow-up (descriptor built faithfully — still no writeback).** We then
+rebuilt the link path so the per-frame register set is assembled directly into
+the descriptor from the register structs, with no MMIO-first programming and the
+single-shot INT_EN arm removed — i.e. the descriptor itself now matches the
+vendor's `rkvdec2_link_prepare` (the `tb_reg` node pointers, the `tb_reg_int`
+offset, and a zeroed part_r writeback region). The hardware **still writes no
+per-task completion status back into the descriptor**, at any pipeline depth —
+and, tellingly, the **same failure occurs for VP9** through the same link path.
+So this is a shared limitation of how a mainline V4L2 m2m client arms the
+single-core link path, not anything AV1-specific, and it lives one level below
+the descriptor contents — in the enqueue/init sequence that *arms* the writeback
+(cache-clear position, the CFG_DONE window, or a work-mode/writeback-enable
+register we have not identified). Until the link path produces clean writebacks
+it cannot run as a genuine continuous node-walk, so the submission-model lever
+stays **inconclusive — neither confirmed nor refuted.** Resolving it needs a
+live MMIO trace of the vendor enqueue, or a pointer from someone with the
+link/CCU documentation.
+
 ## 7. Conclusion — a shared internal-state class with the sibling bugs
 
 Every programmable input matches MPP, MPP decodes the vector byte-exact and
