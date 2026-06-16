@@ -96,11 +96,15 @@ CPU activity during the decode**:
 - **It survives masking all link interrupts** — running the decode with zero CPU↔HW
   MMIO between kick and reap leaves the outcome distribution unchanged. Nothing the
   driver does mid-decode drives it.
+- **It is pinned per module-load, not per-decode** — deterministic within an
+  `insmod`, re-rolled by a fresh load — and the **probe warmup is not the cause**
+  (disabling it gives the same wrong distribution). So the latched state is set at
+  device init by something other than the warmup.
 
-We also **refuted** the previously-promising RCB SRAM-vs-DRAM placement lever (a
-controlled per-region A/B is byte-identical SRAM vs DRAM; the earlier "DRAM
-reconstructed a row" was a first-decode artifact of this very non-determinism), and
-falsified the RCB **slot-4** intra-above-row theory. Full triage in
+We also **refuted** the RCB lever in both dimensions: enlarging the RCB 2–3×
+(Detlev's "too-small RCB → random results" suggestion) gives **byte-identical**
+output, and SRAM-vs-DRAM placement is byte-identical too — bracketing the
+intra-above-row slot across a ~15× size range with no effect. Full triage in
 [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
 
 **Conclusion.** This is the same class as the other VDPU383 V4L2 findings — the

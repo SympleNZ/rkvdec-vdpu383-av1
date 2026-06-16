@@ -107,28 +107,56 @@ So the same input, same register file, same buffers, with no CPU in the loop,
 settles into one of a few discrete states — an un-primed/metastable **internal**
 decoder state sampled at decode start.
 
-## 5. The RCB SRAM-vs-DRAM placement lever — REFUTED
+## 5. RCB size and placement — REFUTED (both)
 
-An earlier revision reported RCB placement as a promising lever below the register
-interface: the vendor `mpp_set_rcbbuf()` rewrites the RCB base registers in-kernel
-at submit (invisible to the HAL register dump), the BSP board's DT has no
-`rcb-iova` so MPP decodes with **DRAM** RCB while our mainline driver uses **SRAM**
-RCB, and an early experiment appeared to show a super-block row reconstructing
-under DRAM that was fill under SRAM.
+**Size.** A natural lead is that our RCB is undersized for AV1 — too-small RCB can
+produce random results. The source backs the premise: our RCB size table is
+derived from MPP's *VP9* `rcb_calc`, while MPP keeps a separate
+`vdpu383_av1d_rcb_calc` that is larger in several regions (inter rows ~16% bigger,
+plus nonzero strmd-in and fltd-upsc-on-col regions and loop-restoration terms the
+VP9 calc zeroes). **Tested by uniformly enlarging every RCB region 2× and 3×:**
+the AV1 output is **byte-identical across scale 1/2/3**, and with the coin-flip
+live (fresh module loads) the outcome distribution is unchanged. The enlargement
+also pushed the RCB from SRAM into DRAM (see placement below), and it brackets the
+intra-above-row slot across a ~15× size range (≈1 KB to ≈17 KB) with no effect.
+RCB undersize does **not** cause the non-determinism — the IOMMU appears to cover
+any undersize.
 
-**That result did not hold up.** A controlled per-region SRAM-vs-DRAM A/B (forcing
-the intra-above-row context and other high-priority RCB regions into each) gave a
-**byte-identical failing outcome** (AV1 1080p partial MAE 97.6 = 97.6 SRAM vs
-DRAM). The earlier "DRAM reconstructed the row" observation was a **first-decode
-artifact of the very non-determinism in §1**, not a placement effect. RCB
-placement does **not** fix or move the bug. (The RCB **slot-4** intra-above-row
-sizing theory was independently falsified earlier: programming MPP's exact slot-4
-length changes nothing, and the buffer is HW-written/HW-read within a
-correctly-based, adequately-sized region.) Cache-attribute variants of the same
-idea (cached RCB + per-frame `dma_sync`, the `dma-buf-cache` model) were also
-tested and are negative.
+**Placement.** A controlled per-region SRAM-vs-DRAM A/B gave a **byte-identical
+failing outcome** (AV1 1080p MAE 97.6 = 97.6), re-confirmed incidentally by the
+size test above (scale=1 ran in SRAM, scale=3 in DRAM, byte-identical). The
+earlier "DRAM reconstructed a row" observation was a first-decode artifact of the
+§1 non-determinism, not a placement effect. The RCB **slot-4** intra-above-row
+sizing theory was independently falsified (MPP's exact slot-4 length changes
+nothing). Cache-attribute variants (cached RCB + per-frame `dma_sync`,
+`dma-buf-cache`) are also negative.
 
-## 6. Conclusion — a shared internal-state class with the sibling bugs
+## 6. The state is pinned per module-load — and the probe warmup is not the cause
+
+The non-determinism is latched **per module-load**, not per-decode. Within a
+single `insmod` the result is deterministic (dozens of identical decodes); each
+fresh `rmmod`/`insmod` re-rolls it into one of a few discrete states; and a `pm`
+suspend/resume cycle transitions it once (a fresh-probe state → a post-resume
+state) then holds. It is also **non-stationary across longer timescales** — the
+same vector decoded correctly ~half the time in one session and was consistently
+wrong in another, with no driver change (a silicon baseline drift, thermal/uptime
+the suspects). This per-load latching points at internal state set at power-up /
+device init.
+
+The obvious suspect is the **H.264-shaped probe warmup** (a priming decode at
+device init that the VP9/H.264 paths rely on; MPP runs no AV1 equivalent) leaving
+the entropy/context engine in a state that's right for H.264 but wrong for AV1.
+**Tested by disabling the probe warmup entirely** (`warmup_off`, confirmed via
+`dmesg` that no warmup ran): 6 fresh loads with the warmup ON and 6 with it OFF
+gave the **same wrong-attractor distribution**. The warmup is **not** the pin —
+disabling it neither fixes AV1 nor changes the failure. So the per-load state is
+set at init by something *other* than the warmup, below every software knob.
+
+> Note on measurement: classify outcomes by **pixel output vs the dav1d reference**,
+> not by reading back the adapted CDF / register file — those heavy MMIO read-backs
+> themselves perturb the metastable state and shift the outcome distribution.
+
+## 7. Conclusion — a shared internal-state class with the sibling bugs
 
 Every programmable input matches MPP, MPP decodes the vector byte-exact and
 deterministically on the same silicon, and the failure survives both an identical
@@ -151,7 +179,7 @@ The common thread is an internal per-frame context / reference-retention block
 whose initialisation is not deterministic from the V4L2 side. A shared root is a
 hypothesis, not proven.
 
-## 7. The question
+## 8. The question
 
 What does the vendor stack do — at device/session init through `mpp_service`, or
 in the submit path — that **pins the VDPU383's internal entropy/context state so
@@ -161,7 +189,7 @@ byte-identical and the result is independent of our register programming and of
 all mid-decode CPU activity? A pointer to the relevant IP state or init sequence
 would unblock this.
 
-## 8. Reproduce
+## 9. Reproduce
 
 See [`BUILD_AND_TEST.md`](BUILD_AND_TEST.md). In short: build `src/`, insmod,
 decode the all-intra vector **several times from fresh state**, and compare each
