@@ -21,56 +21,43 @@ deterministically* under MPP, and the non-determinism survives both an identical
 register file and the removal of all CPU activity during the decode. This is a
 hardware-execution-level question we cannot resolve from the driver side.
 
-> **Update 2026-06-27 (cross-codec, terminal).** The sibling VP9 driver reached the
-> *same* below-MMIO wall via an independent, exhaustive route — byte-identical inputs,
-> config delivered via the DRAM-descriptor HW-fetch path, submission sequence identical
-> to the *working* HEVC backend, and a continuously-armed link ring — all replicating
-> MPP, output still wrong, while MPP is bit-exact to the software reference on the same
-> silicon. AV1 and VP9 are the **same hardware-internal wall**.
->
-> The last open lead — MPP's per-frame **PM / IOMMU / clock cycling** — has now been
-> tested and **refuted for both codecs.** Forcing genuine per-frame suspend→resume
-> cycles (IOMMU re-init + clock off/on + warmup, ftrace-confirmed landing *between* a
-> KEY frame and the first INTER frame, escalated up to 12 cycles) changed nothing —
-> byte-identical wrong output for VP9, 0/39 exact for AV1. Operation-class coverage is
-> complete: our driver exercises every clock / IOMMU / reset / PM / warmup operation
-> class MPP does. **And the decisive observation:** AV1 frame 0's first 16 bytes are
-> *byte-exact* to the reference, yet the frame's Y-MAE is ~90 — each frame **starts
-> correct and diverges mid-frame**. The hardware receives correct inputs, begins
-> decoding correctly, and diverges during its own internal pass — below-MMIO by
-> definition, unfixable from the driver side. The only un-run check (a register-*value*
-> rwmmio diff) needs a full vendor-kernel rebuild and is very unlikely to surface
-> anything new, since register values are already proven byte-identical to MPP. See the
-> VP9 repo's `VP9_SEQUENCE_IOMMU_INVESTIGATION_2026-06-26.md`.
-
 This repo is published **downstream-first**: working code plus a precise,
 fully-triaged question for the people with the hardware documentation
 (Collabora / the VDPU383 maintainers). See
 [The decode-non-determinism bug](#the-decode-non-determinism-bug-the-open-question).
 
-> Status as of 2026-06-16. Independent development on the RK3576 VDPU383, sibling
-> of [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — same
-> SoC, same source tree, same downstream-first approach.
->
-> **Correction (2026-06-13):** earlier revisions framed the bug as a *deterministic
-> partial decode* ("top ~38 % of rows reconstruct, rest flat DC"). That was one
-> snapshot of the wrong outcome; the actual behaviour is **per-decode
-> non-determinism** (correct ~half the time, otherwise a discrete wrong/silent
-> state). A once-promising **RCB SRAM-vs-DRAM placement** lever was also
-> **refuted**. See [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
->
-> **Update (2026-06-26) — root cause localised + holistic replication exhausted.**
-> A quantiser sweep pinned the defect to the **coefficient-reconstruction stage**
-> (dequantisation / inverse transform): at maximum quant (≈zero residual) the decode
-> is **bit-exact**, and the error appears and grows with residual energy — so intra
-> prediction, the above-row context, and entropy/CDF are all *correct*, and the
-> RCB-locus framing is superseded. Every element of the vendor per-frame sequence has
-> now been replicated and verified — including the previously-skipped **continuous
-> submission ring**, which on hardware engaged faithfully yet left the output still
-> wrong. With the full vendor sequence matched and the decode still broken, the defect
-> is **below the entire V4L2-reproducible surface** (vendor `mpp_service` / HW session
-> state). The driver is **bit-exact for zero/low-residual AV1** and defective only in
-> residual reconstruction. See [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
+## Status
+
+The driver is feature-complete and MPP-faithful on everything the V4L2 stack
+controls; the single open defect is the non-deterministic output described above.
+Triage is exhaustive and the conclusion is **terminal from the driver side**:
+
+- **Root cause localised to coefficient reconstruction.** A quantiser sweep pins
+  the defect to the dequantisation / inverse-transform stage: at maximum quant
+  (≈zero residual) the decode is **bit-exact**, and the error appears and grows with
+  residual energy. Intra prediction, the above-row context, and entropy/CDF are all
+  correct — the driver is bit-exact for zero/low-residual AV1.
+- **The full vendor sequence is replicated and the output is still wrong.** Every
+  programmable input is byte-identical to MPP (GBL, CDF, register file, bitstream);
+  the per-frame register read-back is identical across CORRECT/WRONG/SILENT runs;
+  masking all link interrupts changes nothing; the continuous link/CCU submission
+  ring engages faithfully; and the complete per-frame clock / IOMMU / reset / PM /
+  warmup operation set has been forced and verified. None of it changes the result.
+- **The decode starts correct and diverges mid-frame.** Frame 0's first 16 bytes are
+  byte-exact to the dav1d reference, yet the frame's Y-MAE is ~90 — the hardware
+  receives correct inputs, begins decoding correctly, and diverges during its own
+  internal pass. The wrong output is metastable (a discrete wrong/silent state,
+  pinned per module-load, re-rolled by a fresh load) but never becomes correct
+  without the vendor stack.
+- **Same wall as the sibling VP9 driver**
+  ([`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9)), reached
+  independently — one hardware-internal issue across both VDPU383 codecs (VP9 fails
+  deterministically, AV1 metastably).
+
+The one un-run check is a register-*value* `rwmmio` diff, which needs a full
+vendor-kernel rebuild and is very unlikely to surface anything new — the register
+values are already proven byte-identical to MPP, and the core clk/IOMMU driver
+register values are not our code.
 
 ---
 
@@ -166,15 +153,22 @@ H.264 deblock race (**fixed**, by a power-up warmup decode at probe — an init-
 prime invisible to per-frame diffs) and the VP9 small-footprint reference bypass
 (sibling repo) — *registers/headers/CDF/stream all match MPP, the hardware differs
 anyway.* The remaining variable is an **un-primed / metastable internal decoder
-state** sampled at decode start, which the vendor submit path pins and a mainline
-V4L2 m2m client does not.
+state** sampled at decode start. We initially supposed the vendor *submit path*
+pinned it — but the submit path has since been replicated (the continuous link/CCU
+ring engages faithfully), along with the full per-frame clock / IOMMU / reset / PM /
+warmup operation set, and the result is unchanged. So the state is established below
+even the submit path and the per-frame operation set — at device/session init or in
+the IP itself — beyond the V4L2-reproducible surface.
 
 **The question for someone with the VDPU383 docs:** what does the vendor stack do —
-at device/session init (`mpp_service`) or in the submit path — that pins the
-VDPU383's internal entropy/context state so an AV1 KEY frame decodes
-deterministically, given the per-frame register file, GBL, CDF, and bitstream are
-all byte-identical and the result is independent of our register programming and of
-all mid-decode CPU activity? Even a "look at X" would unblock it.
+at device/session init (`mpp_service`) or inside the IP — that pins the VDPU383's
+internal entropy/context state so an AV1 KEY frame decodes deterministically and
+correctly, given the per-frame register file, GBL, CDF, and bitstream are all
+byte-identical, the submission ring and the full clock/IOMMU/PM/warmup operation set
+are replicated, the result is independent of our register programming and all
+mid-decode CPU activity, and the decode demonstrably *starts* correct (frame 0's
+first 16 bytes byte-exact) and diverges mid-frame? Even a "look at X" would unblock
+it.
 
 ---
 
