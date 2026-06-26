@@ -312,13 +312,28 @@ HW-fetch** path, a submission sequence **identical to the working HEVC backend**
 are now understood as the **same hardware-internal wall** — identical inputs, different pixels,
 same chip, below every register.
 
-**One dimension remains un-examined for both codecs.** A full hardware-access trace of MPP shows
-it cycles, *per frame*: IOMMU TLB flush, IOMMU re-initialisation (`rk_iommu_resume`), and decoder-
-clock gating — operations our stack does not perform per frame. Earlier work tested power forced
-*on* (continuous), the opposite of MPP's per-frame cycling. The next decisive test is a full
-hardware-access diff with our kernel rebuilt `CONFIG_TRACE_MMIO_ACCESS=y`, comparing every
-clock / IOMMU / reset / PM operation operation-for-operation against MPP. Only if they match is
-below-MMIO truly final.
+**The last open lead — per-frame PM/IOMMU/clock cycling — has been tested and refuted (2026-06-27).**
+A full hardware-access trace of MPP showed it cycles, *per frame*: IOMMU TLB flush, IOMMU
+re-initialisation (`rk_iommu_resume`), and decoder-clock gating. We forced our driver to do the
+same — genuine per-frame suspend→resume with IOMMU re-init, clock off/on and the RK3576 warmup,
+ftrace-confirmed to land *between* the KEY frame and the first INTER frame, escalated up to 12
+cycles. **It changed nothing: 0/39 frames exact, default and cycled.** VP9 behaved identically
+(byte-identical wrong output). Operation-class coverage is now complete — our driver exercises
+every clock / IOMMU / reset / PM / warmup operation class MPP does; no MPP operation class is
+absent.
+
+**The decisive observation — the decode starts correct and diverges mid-frame.** AV1 frame 0's
+first 16 bytes are **byte-exact to the dav1d reference**, yet the frame's Y-MAE is ~90. The
+hardware receives correct inputs (proven byte-identical), *begins* decoding correctly, and then
+diverges during its own internal pass. AV1 diverges metastably (wrong output varies run-to-run,
+never correct); VP9 deterministically. This is below-MMIO by definition — there is no driver-side
+input or operation that can change an internal computation the hardware performs correctly at the
+start of the frame and wrong by the end.
+
+The only un-run check is a register-*value* rwmmio diff, which needs a full Armbian vendor-kernel
+rebuild (high cost / per-boot re-brick risk) and is very unlikely to surface anything new — the
+decoder register values are already proven byte-identical to MPP, and the core clk/IOMMU driver
+register values are not our code. **The investigation is terminal.**
 
 (AV1's manifestation localises to **coefficient reconstruction** — dequant / inverse-transform,
 via a base-q-idx sweep — distinct from VP9's **sub-pel / motion-comp** manifestation, but the same

@@ -21,19 +21,27 @@ deterministically* under MPP, and the non-determinism survives both an identical
 register file and the removal of all CPU activity during the decode. This is a
 hardware-execution-level question we cannot resolve from the driver side.
 
-> **Update 2026-06-26 (cross-codec).** The sibling VP9 driver reached the *same*
-> below-MMIO wall via an independent, exhaustive route — byte-identical inputs,
-> config delivered via the DRAM-descriptor HW-fetch path, submission sequence
-> identical to the *working* HEVC backend, and a continuously-armed link ring
-> (HW armed across frames, no disarm) — all replicating MPP, output still wrong,
-> while MPP is bit-exact to the software reference on the same silicon. AV1 and
-> VP9 are now understood as the **same hardware-internal wall**. One dimension
-> remains un-examined for both: MPP's **per-frame PM / IOMMU / clock cycling**
-> (per-task `iommu_flush_tlb`, `rk_iommu_resume`, clock gating) was filtered out
-> of the trace comparison; replicating MPP's *cycling* (not the force-on we
-> tested) is the next decisive test, via a full hardware-access diff with our
-> kernel rebuilt `CONFIG_TRACE_MMIO_ACCESS=y`. See the VP9 repo's
-> `VP9_SEQUENCE_IOMMU_INVESTIGATION_2026-06-26.md`.
+> **Update 2026-06-27 (cross-codec, terminal).** The sibling VP9 driver reached the
+> *same* below-MMIO wall via an independent, exhaustive route — byte-identical inputs,
+> config delivered via the DRAM-descriptor HW-fetch path, submission sequence identical
+> to the *working* HEVC backend, and a continuously-armed link ring — all replicating
+> MPP, output still wrong, while MPP is bit-exact to the software reference on the same
+> silicon. AV1 and VP9 are the **same hardware-internal wall**.
+>
+> The last open lead — MPP's per-frame **PM / IOMMU / clock cycling** — has now been
+> tested and **refuted for both codecs.** Forcing genuine per-frame suspend→resume
+> cycles (IOMMU re-init + clock off/on + warmup, ftrace-confirmed landing *between* a
+> KEY frame and the first INTER frame, escalated up to 12 cycles) changed nothing —
+> byte-identical wrong output for VP9, 0/39 exact for AV1. Operation-class coverage is
+> complete: our driver exercises every clock / IOMMU / reset / PM / warmup operation
+> class MPP does. **And the decisive observation:** AV1 frame 0's first 16 bytes are
+> *byte-exact* to the reference, yet the frame's Y-MAE is ~90 — each frame **starts
+> correct and diverges mid-frame**. The hardware receives correct inputs, begins
+> decoding correctly, and diverges during its own internal pass — below-MMIO by
+> definition, unfixable from the driver side. The only un-run check (a register-*value*
+> rwmmio diff) needs a full vendor-kernel rebuild and is very unlikely to surface
+> anything new, since register values are already proven byte-identical to MPP. See the
+> VP9 repo's `VP9_SEQUENCE_IOMMU_INVESTIGATION_2026-06-26.md`.
 
 This repo is published **downstream-first**: working code plus a precise,
 fully-triaged question for the people with the hardware documentation
