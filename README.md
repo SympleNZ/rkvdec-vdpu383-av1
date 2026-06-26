@@ -21,6 +21,20 @@ deterministically* under MPP, and the non-determinism survives both an identical
 register file and the removal of all CPU activity during the decode. This is a
 hardware-execution-level question we cannot resolve from the driver side.
 
+> **Update 2026-06-26 (cross-codec).** The sibling VP9 driver reached the *same*
+> below-MMIO wall via an independent, exhaustive route — byte-identical inputs,
+> config delivered via the DRAM-descriptor HW-fetch path, submission sequence
+> identical to the *working* HEVC backend, and a continuously-armed link ring
+> (HW armed across frames, no disarm) — all replicating MPP, output still wrong,
+> while MPP is bit-exact to the software reference on the same silicon. AV1 and
+> VP9 are now understood as the **same hardware-internal wall**. One dimension
+> remains un-examined for both: MPP's **per-frame PM / IOMMU / clock cycling**
+> (per-task `iommu_flush_tlb`, `rk_iommu_resume`, clock gating) was filtered out
+> of the trace comparison; replicating MPP's *cycling* (not the force-on we
+> tested) is the next decisive test, via a full hardware-access diff with our
+> kernel rebuilt `CONFIG_TRACE_MMIO_ACCESS=y`. See the VP9 repo's
+> `VP9_SEQUENCE_IOMMU_INVESTIGATION_2026-06-26.md`.
+
 This repo is published **downstream-first**: working code plus a precise,
 fully-triaged question for the people with the hardware documentation
 (Collabora / the VDPU383 maintainers). See
@@ -36,6 +50,19 @@ fully-triaged question for the people with the hardware documentation
 > non-determinism** (correct ~half the time, otherwise a discrete wrong/silent
 > state). A once-promising **RCB SRAM-vs-DRAM placement** lever was also
 > **refuted**. See [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
+>
+> **Update (2026-06-26) — root cause localised + holistic replication exhausted.**
+> A quantiser sweep pinned the defect to the **coefficient-reconstruction stage**
+> (dequantisation / inverse transform): at maximum quant (≈zero residual) the decode
+> is **bit-exact**, and the error appears and grows with residual energy — so intra
+> prediction, the above-row context, and entropy/CDF are all *correct*, and the
+> RCB-locus framing is superseded. Every element of the vendor per-frame sequence has
+> now been replicated and verified — including the previously-skipped **continuous
+> submission ring**, which on hardware engaged faithfully yet left the output still
+> wrong. With the full vendor sequence matched and the decode still broken, the defect
+> is **below the entire V4L2-reproducible surface** (vendor `mpp_service` / HW session
+> state). The driver is **bit-exact for zero/low-residual AV1** and defective only in
+> residual reconstruction. See [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
 
 ---
 
@@ -116,13 +143,14 @@ intra-above-row slot across a ~15× size range with no effect. We also **probed
 the submission model**: the vendor stack runs AV1 through the link/CCU descriptor
 path (zero per-frame register MMIO) while we run single-shot direct-MMIO, so we
 implemented link/CCU submission for AV1 and A/B-tested it — link mode lands on the
-**same per-load wrong attractors** as single-shot. (Inconclusive — not refuted. A
-code audit then showed that port was not MPP-faithful, so we rebuilt the link path
-to assemble the descriptor directly from the register structs, matching the
-vendor's `rkvdec2_link_prepare`. The hardware **still writes no per-task completion
-status** — and the same holds for VP9 — so the lever is blocked one level deeper,
-on what *arms* the writeback in the enqueue/init sequence. A live MMIO trace or the
-link/CCU docs would settle it.) Full triage in
+**same per-load wrong attractors** as single-shot. (**Refuted, 2026-06-23.** A live
+MPP MMIO trace on the BSP board revealed the missing piece: BSP enables the link
+IRQ once at probe, and our link path had left it *disabled* — so it completed
+silently with no writeback. Re-enabling it made the writeback appear and the link
+path complete cleanly, and the re-run A/B *still* lands on the same per-load
+attractors. So the submission model is **not** the cause — it reaches the identical
+metastable states either way. Continuous link mode remains valuable as a
+*throughput* feature, not a correctness fix.) Full triage in
 [`docs/NONDETERMINISM_BUG.md`](docs/NONDETERMINISM_BUG.md).
 
 **Conclusion.** This is the same class as the other VDPU383 V4L2 findings — the

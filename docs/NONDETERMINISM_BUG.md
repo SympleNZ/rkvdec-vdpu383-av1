@@ -18,6 +18,39 @@ evidence trail.
 > placement** lever was **refuted** (§5). The "below-MMIO" conclusion is unchanged
 > and is now established more strongly (§3, §4).
 
+> **Root cause narrowed (2026-06-25).** A quantiser sweep on the failing content
+> localises the bug to the **coefficient-reconstruction stage (dequantisation /
+> inverse transform)**, *not* prediction, the RCB intra-above-row context, or
+> entropy/CDF. Re-encoding the same content and decoding at varying QP:
+> **`base_q_idx = 255` (≈zero residual) decodes BIT-EXACT**; the error appears and
+> grows with residual/coefficient energy. Because the zero-residual path fully
+> exercises intra prediction, the RCB above-row context, and CDF/entropy yet is
+> *perfect*, those stages are all correct; the damage is in how the hardware
+> reconstructs residual coefficients. The earlier "DC steps / top-band" spatial
+> pattern was residual error *propagating through correct intra prediction*. Every
+> driver-programmed input (controls, default CDF, GBL header, all decode-critical
+> registers, cache config, RK3576 warmup) is byte-verified identical to MPP, so the
+> divergence is in HW residual-reconstruction precision given identical inputs.
+> Minimal reproducer: any multi-superblock real-content frame at crf 20–40 (q=255
+> passes; synthetic/testsrc never reproduces). Full trail:
+> `docs/rk3576/AV1_MPP_LIVE_TRACE_ANALYSIS_2026-06-25.md`.
+
+> **EXHAUSTED — holistic replication complete (2026-06-26).** Every element of the
+> vendor MPP→BSP per-frame sequence has now been replicated and verified, *including
+> the one structural piece previously skipped*: the **continuous CCU submission ring**.
+> On hardware the faithful ring engaged (the per-frame append path went live, the IP
+> stayed primed across all frames) and **the decode is still wrong** — both single-shot
+> and continuous-ring produce broken output across every frame. With registers, buffers,
+> default CDF, GBL header, stream, cache config, RK3576 warmup, IOMMU enable, *and* the
+> continuous ring all matching the vendor stack, and the output still wrong, the defect
+> is **below the entire V4L2-reproducible surface** — in the vendor `mpp_service` / HW
+> session state that a mainline stateless driver cannot express. This is an exhaustive
+> elimination, not a partial one: there is no remaining above-/at-driver lever. The
+> driver is correct for zero/low-residual AV1 (bit-exact at max quant) and defective
+> only where residual coefficients must be reconstructed. See
+> `docs/rk3576/CCU_RING_M2_DESIGN_2026-06-26.md` and
+> `AV1_HOLISTIC_MPP_BSP_SEQUENCE_2026-06-26.md`.
+
 ## 1. Symptom — per-decode non-determinism
 
 Test vector: `av1-1-b8-02-allintra_20201006.ivf` — 352×288, 4:2:0, 8-bit,
@@ -156,7 +189,21 @@ set at init by something *other* than the warmup, below every software knob.
 > not by reading back the adapted CDF / register file — those heavy MMIO read-backs
 > themselves perturb the metastable state and shift the outcome distribution.
 
-## 6.5 The submission model (single-shot vs link/CCU) — tested, INCONCLUSIVE (port not yet MPP-faithful)
+## 6.5 The submission model (single-shot vs link/CCU) — REFUTED (with a now-working link path)
+
+**Resolution (2026-06-23).** Earlier this lever was *inconclusive* because our link path was not
+MPP-faithful (it completed silently with no per-task writeback). A live MPP rwmmio trace on the BSP
+board (`CONFIG_TRACE_MMIO_ACCESS` kernel) showed the missing piece: the BSP enables the link IRQ once
+at probe (the enqueue never writes INT_EN), and our port had left the link IRQ **disabled** in the
+link path. Re-enabling it made the link path complete cleanly — depth-1 went from SILENT to clean
+delivery, and per-task writebacks now appear. With a **genuinely working link path**, the A/B was
+re-run: link mode lands on the **same per-load wrong attractors as single-shot** (e.g. `91673340100a`
+recurs in both). The submission model reaches the identical internal metastable states either way, so
+it is **refuted** as the cause of the AV1 non-determinism. (Continuous link mode remains valuable as a
+*throughput* feature — register file via descriptor, ~15 MMIO ops/frame vs ~228 single-shot — but it
+does not change decode correctness.)
+
+### Original analysis (kept for the record)
 
 A function-order trace of the vendor stack (MPP) on the BSP board showed MPP runs
 AV1 through the VDPU383 **link/CCU descriptor path** — per frame it builds the
@@ -250,3 +297,29 @@ between correct and a discrete wrong/silent state. MPP cross-dumps: build MPP wi
 `DUMP_VDPU38X_DATAS`, decode the same `.ivf` with `mpi_dec_test -t 16777224`, and
 diff `global_cfg.dat`, `cdf_rd_def.dat`, `regs_full.dat`, and `stream_in.dat`
 against the kernel-side dumps (all byte-identical).
+
+---
+
+## 10. 2026-06-26 update — cross-codec symmetry + the open PM/IOMMU lead
+
+The sibling **VP9** driver (`rkvdec-vdpu383-vp9`) reached the *same* below-MMIO wall by an
+independent, exhaustive route, which strengthens the AV1 conclusion. For a single md5-identical
+VP9 clip on the same silicon, MPP is **bit-exact to the software reference (ffmpeg/libvpx)** while
+our V4L2 stack is wrong — and we then replicated MPP to the byte: identical register file
+(offsetof field-mapped), byte-identical stream bytes, config delivered via the **DRAM-descriptor
+HW-fetch** path, a submission sequence **identical to the working HEVC backend**, and a
+**continuously-armed link ring** (HW armed across frames, no disarm). All still wrong. AV1 and VP9
+are now understood as the **same hardware-internal wall** — identical inputs, different pixels,
+same chip, below every register.
+
+**One dimension remains un-examined for both codecs.** A full hardware-access trace of MPP shows
+it cycles, *per frame*: IOMMU TLB flush, IOMMU re-initialisation (`rk_iommu_resume`), and decoder-
+clock gating — operations our stack does not perform per frame. Earlier work tested power forced
+*on* (continuous), the opposite of MPP's per-frame cycling. The next decisive test is a full
+hardware-access diff with our kernel rebuilt `CONFIG_TRACE_MMIO_ACCESS=y`, comparing every
+clock / IOMMU / reset / PM operation operation-for-operation against MPP. Only if they match is
+below-MMIO truly final.
+
+(AV1's manifestation localises to **coefficient reconstruction** — dequant / inverse-transform,
+via a base-q-idx sweep — distinct from VP9's **sub-pel / motion-comp** manifestation, but the same
+class of below-register hardware-state divergence.)
