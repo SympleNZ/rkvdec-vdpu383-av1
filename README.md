@@ -299,7 +299,6 @@ ground-truth reference throughout, and building it out-of-tree on mainline was w
 turned the conclusion from "silicon" to "driver". Thanks for the foundation — it
 made this possible.
 
-Simon Wright, Symple Solutions, Dunedin NZ.
 
 **GPL-2.0** (Linux kernel out-of-tree module), consistent with the mainline
 Rockchip `rkvdec` driver it derives from. Source files carry
