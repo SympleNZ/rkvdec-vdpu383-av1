@@ -268,8 +268,9 @@ Full reproduction, the MPP cross-dump procedure and the triage scripts are in
 AV1 endpoint decode is **not currently required** (the shipping cast path is HEVC;
 YouTube playback uses yt-dlp + HLS software decode). Where correct AV1 decode is
 needed on this silicon, the path is the **vendor MPP stack** — either on the BSP
-kernel or as the out-of-tree build on mainline 7.0 proven correct here (licensing
-is clean) — not this V4L2 driver.
+kernel or as the out-of-tree build on mainline 7.0 proven correct here (published:
+[`rkvdec-vdpu383-mpp-mainline`](https://github.com/SympleNZ/rkvdec-vdpu383-mpp-mainline);
+licensing clean) — not this V4L2 driver.
 
 This V4L2 AV1 work stands as a **complete, evidence-bounded characterisation**: the
 first mainline-Linux V4L2 stateless AV1 attempt on the RK3576 VDPU383, the
