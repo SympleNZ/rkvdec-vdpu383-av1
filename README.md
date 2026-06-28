@@ -122,7 +122,8 @@ behaviour does **not** fix it:
 - **Platform knobs excluded.** `pmu_idle` (not required for correct AV1), the
   RK3576 H.264 warmup (an H.264-specific fix), per-decode IOMMU TLB flush, buffer
   coherency (every buffer the HW reads is `dma_alloc_coherent`), the cache window,
-  and the live decoder clock rates (pinned to MPP's exact 200/200/297 MHz) — all
+  and the live decoder clock rates (our ~594/1000 MHz already match MPP's
+  DT-assigned operating rates; a further pin to 200/297 MHz changed nothing) — all
   byte-identical-to-MPP or A/B-negative.
 - **The maximal faithful combination is negative.** Per the rule that an
   MPP-faithful behaviour stays on even when individually negative (so the cure can
@@ -292,4 +293,7 @@ turned the conclusion from "silicon" to "driver". Thanks for the foundation — 
 made this possible.
 
 Simon Wright, Symple Solutions, Dunedin NZ.
-MIT-licensed (see [LICENSE](LICENSE)).
+
+**GPL-2.0** (Linux kernel out-of-tree module), consistent with the mainline
+Rockchip `rkvdec` driver it derives from. Source files carry
+`SPDX-License-Identifier: GPL-2.0` headers (see [LICENSE](LICENSE)).
