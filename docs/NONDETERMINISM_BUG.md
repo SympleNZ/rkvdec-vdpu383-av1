@@ -1,3 +1,10 @@
+> **NOTE (2026-06-28): the silicon-metastability framing in this document is SUPERSEDED.**
+> The AV1 "coin-flip" non-determinism was proven to be a V4L2-DRIVER property, not silicon: the vendor
+> MPP decoder built out-of-tree on the same mainline kernel/DT/silicon decodes AV1 bit-exact and fully
+> deterministically. The residual is below every V4L2-touchable interface (sub-MMIO timing/ordering),
+> driver-addressable in principle but not fixable through mainline V4L2. See the README for the final,
+> authoritative conclusion. This file is retained as investigation history.
+
 # The AV1 decode non-determinism bug — full triage
 
 VDPU383 (RK3576) V4L2 stateless AV1. Every above-MMIO input matches the vendor
