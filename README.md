@@ -143,24 +143,62 @@ produces different symbols than MPP's from the **same** CDF input, same bitstrea
 same registers, same clean reset, on the **same silicon**. That is a true
 entropy-decode divergence with every driver-provided input verified correct.
 
-### 4. The residual
+### 4. The graft: MPP's actual back-end under our front-end — still wrong
+
+The first three points re-implement MPP *faithfully*. The graft stops
+reinterpreting and runs MPP's **actual compiled back-end** under our V4L2
+front-end: our `device_run()` builds the register set (byte-identical to MPP, as
+proven above), then submits it through an in-kernel `mpp_service` client into MPP's
+real `mpp_rkvdec2` / `mpp_rkvdec2_link` code, using MPP's own internal buffers. The
+same hardware-driving code that decodes AV1 bit-exact under libmpp, driven from our
+front-end, lands on the **same wrong-attractor set** as our standalone driver. The
+back-end, the register image, the buffer allocation and the dma-buf import are
+thereby all positively excluded — the divergence is in none of them.
+
+### 5. The mpp_service boundary: identical for both callers, and no process context
+
+Both front-ends — libmpp (correct) and our graft (wrong) — meet MPP's back-end at
+exactly one interface: the `mpp_service` session/submit boundary. A line-for-line
+source diff of that boundary shows it is **functionally identical** for both: one
+session per stream (not per-frame), the same `INIT_CLIENT_TYPE` bind, the same
+shared taskqueue worker and run path, the device **held resumed** across the whole
+stream (2 s autosuspend) in both. The boundary keys **nothing** to the calling
+process — no `mm`, no fd-table, no PASID, no per-process IOMMU domain (the IOMMU
+domain is per-device and shared; the session is a plain struct on a `struct file`;
+the only `current->` use is a cosmetic debug `pid`). The "a userspace process
+supplies something a kernel client cannot" hypothesis is therefore **falsified in
+source**: the graft replicates every boundary operation verbatim, submits a
+byte-identical register image into the same back-end via the same worker, and the
+HW still diverges.
+
+### 6. The residual
 
 Combining all of the above: from a clean reset, with literally every byte the HW
-reads verified byte-identical to MPP, and every register/buffer/reset/clock/
-submission lever matched or A/B-ruled-out same-board, the decode is
+reads verified byte-identical to MPP, every register/buffer/reset/clock/submission
+lever matched or A/B-ruled-out same-board, **MPP's exact back-end driven from our
+front-end still wrong**, and the one interface where the two paths meet proven
+functionally identical with no process-context binding — the decode is
 deterministically wrong while MPP on the identical silicon is correct.
 
-**The residual is below every interface the mainline V4L2 stateless driver
-controls** — it is sub-MMIO operation ordering/timing relative to power/clock/PM
-transitions, invisible to register and buffer dumps, that the vendor driver's
-structure produces and our re-implementation does not. It is driver-addressable in
-principle (the silicon is capable — MPP proves it), but **not fixable through any
-interface this driver has**. Resolving it cleanly would need cycle/bus-level AXI
-tracing we do not have on this board, or the VDPU383 documentation.
+**The residual is HW-internal: the VDPU383's symbol/entropy-decoder internal state,
+below every software-visible operation at the narrowest interface either stack
+touches.** It is not a register value, a buffer property, an operation order, a
+PM/reset choreography, or a process-context binding — each of those has been
+matched-to-MPP or excluded, now from **four independent directions** (our→MPP
+decode-op matching; MPP→ours reverse bisection; the graft; the boundary diff). The
+adapted CDF the hardware writes back diverges ~68% from MPP's from the first
+context either side adapts — the measurable fingerprint of the divergence (§3). It
+is driver-addressable in principle (the silicon is capable — MPP proves it) but
+**not reachable through any software interface on this hardware**. Resolving it
+would need the VDPU383 documentation or cycle/bus-level AXI tracing we do not have
+on this board.
 
+The stateless V4L2 paradigm itself is **not** the blocker: this same driver ships
+HEVC, H.264 and VP9 (KEY / single-reference / low-motion) bit-exact to MPP. The
+defect is specific to the advanced adaptive-entropy paths — AV1, and VP9 compound.
 The sibling [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9)
-driver reached the same wall independently — one driver-reachable class of defect
-across both VDPU383 V4L2 codecs.
+driver reached the same wall independently — one HW-internal class of defect across
+both VDPU383 V4L2 codecs.
 
 ### The one correctness fix this work produced: the CDEF un-remap bug
 
@@ -276,12 +314,13 @@ This V4L2 AV1 work stands as a **complete, evidence-bounded characterisation**: 
 first mainline-Linux V4L2 stateless AV1 attempt on the RK3576 VDPU383, the
 infrastructure to drive it (controls, GBL pack, CDF tables, register/descriptor
 construction, both submission paths), one real correctness fix (CDEF un-remap),
-and the bug narrowed to the exact silicon boundary — a driver-reachable defect
-that no interface this driver controls can reach. The active hunt is **paused, not
-abandoned**: the deterministic harness, the `ip_reset` baseline, and the one cheap
-re-entry point (a same-board MMU register-bank diff, MPP vs ours) are documented
-for anyone — with the VDPU383 docs or cycle-level tracing — who wants to take it
-further.
+and the bug narrowed — from **four independent directions** (decode-op matching,
+MPP→ours reverse bisection, the graft, and the `mpp_service`-boundary diff) — to
+the VDPU383's internal entropy-decoder state, below every software interface on this
+silicon. The active hunt is **paused, not abandoned**: the deterministic harness,
+the `ip_reset` baseline, and the measurable `cabac_cdf_out` ~68%-divergence
+fingerprint are documented for anyone — with the VDPU383 docs or cycle-level
+tracing — who wants to take it further.
 
 ---
 

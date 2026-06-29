@@ -345,3 +345,24 @@ register values are not our code. **The investigation is terminal.**
 (AV1's manifestation localises to **coefficient reconstruction** — dequant / inverse-transform,
 via a base-q-idx sweep — distinct from VP9's **sub-pel / motion-comp** manifestation, but the same
 class of below-register hardware-state divergence.)
+
+## 11. 2026-06-29 update — the open PM/IOMMU lead is CLOSED; four-terminal terminal
+
+The §10 "open PM/IOMMU lead" is now closed by two further independent cuts, and the earlier
+"below-MMIO operation timing relative to power/clock/PM" phrasing is **corrected** (the boundary source
+diff shows there is no per-job PM/reset choreography distinguishing the two stacks):
+
+- **The graft** ran MPP's *actual compiled* `mpp_rkvdec2_link` back-end (in-kernel `mpp_service` client,
+  `mpp_graft.c`) under our V4L2 front-end register-build. It produced the **same wrong attractor** as our
+  standalone driver — excluding the back-end, MPP's internal buffers, the dma-buf import and the register
+  image (`GRAFT_TERMINAL_2026-06-29.md`).
+- **The `mpp_service`-boundary source diff** found the one interface both stacks share **functionally
+  identical** (one session per stream, shared taskqueue worker, device held resumed across the stream)
+  and carrying **no process context** — no `current->`/`tgid`/`mm`/PASID/per-process IOMMU domain (the
+  IOMMU domain is per-device and shared). The process-context hypothesis is **falsified in source**
+  (`MPP_SERVICE_BOUNDARY_RESULT_2026-06-29.md`).
+
+So the residual is excluded from **four independent directions** (decode-op matching; MPP→ours reverse
+bisection; the graft; the boundary diff) and is HW-internal entropy/symbol-decoder state. The measurable
+fingerprint is `cabac_cdf_out`: byte-identical input CDF, ~68%-divergent output CDF from the first
+adapted context. The maintainer-grade package is `VDPU383_ENTROPY_RESIDUAL_EVIDENCE_BRIEF_2026-06-29.md`.
