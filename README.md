@@ -195,10 +195,39 @@ on this board.
 
 The stateless V4L2 paradigm itself is **not** the blocker: this same driver ships
 HEVC, H.264 and VP9 (KEY / single-reference / low-motion) bit-exact to MPP. The
-defect is specific to the advanced adaptive-entropy paths — AV1, and VP9 compound.
+defect is specific to the advanced adaptive-coding paths — AV1, and VP9 compound
+(§7 refines this into two distinct effects: a metastable *entropy* effect on intra,
+and a deterministic *motion-compensation* effect on inter/compound).
 The sibling [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9)
-driver reached the same wall independently — one HW-internal class of defect across
-both VDPU383 V4L2 codecs.
+driver reached the same wall independently.
+
+### 7. The final cut: MPP's golden output, and a two-bug refinement
+
+The last and narrowest comparison captured MPP's **correct, golden** intermediate
+output — the adapted CDF (`cabac_cdf_out`) and the decoded frame — via libmpp's own
+dump path, and byte-diffed it against ours on **deterministic** frames (the
+metastable all-intra case above is the wrong tool for a byte diff; these frames are
+reproducible). It confirms the below-software conclusion from a fifth,
+golden-referenced direction *and* sharpens it into two distinct effects:
+
+- **Intra (all-intra AV1) — metastable, entropy.** This is what §1–§6 dissect: the
+  arithmetic decoder's probability-interval logic is sensitive to a HW-internal
+  state, only near-boundary symbol decisions diverge, and the adapted CDF coin-flips
+  (the ~68% fingerprint). It is niche — it only bites boundary-heavy intra content.
+- **Inter (real AV1 with inter prediction) — deterministic, motion-compensation.**
+  Here the failure is different and reproducible: the decoder emits a **previous
+  reference frame unchanged** ("frame-stuck") instead of running inter prediction.
+  Crucially, on these frames the **entropy/CDF path matches MPP** — the adapted CDF
+  is zero on the non-adapting inter frames for *both* stacks — so the divergence is
+  **not** entropy; it is in the motion-compensation / prediction pixel path, below
+  the register/buffer/entropy interface. This is the same "stuck-on-reference"
+  signature the sibling VP9 driver shows on compound frames, and it is the
+  **product-relevant** one.
+
+So the one "HW-internal" wall has two faces — a metastable arithmetic-decoder on
+intra, and a deterministic motion-compensation fault on inter/compound — and neither
+is reachable through any software interface, now confirmed against MPP's golden
+output on deterministic frames.
 
 ### The one correctness fix this work produced: the CDEF un-remap bug
 

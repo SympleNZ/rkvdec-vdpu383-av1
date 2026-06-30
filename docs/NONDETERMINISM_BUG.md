@@ -363,6 +363,24 @@ diff shows there is no per-job PM/reset choreography distinguishing the two stac
   (`MPP_SERVICE_BOUNDARY_RESULT_2026-06-29.md`).
 
 So the residual is excluded from **four independent directions** (decode-op matching; MPP→ours reverse
-bisection; the graft; the boundary diff) and is HW-internal entropy/symbol-decoder state. The measurable
-fingerprint is `cabac_cdf_out`: byte-identical input CDF, ~68%-divergent output CDF from the first
-adapted context. The maintainer-grade package is `VDPU383_ENTROPY_RESIDUAL_EVIDENCE_BRIEF_2026-06-29.md`.
+bisection; the graft; the boundary diff) and is HW-internal. The measurable fingerprint for the
+all-intra case is `cabac_cdf_out`: byte-identical input CDF, ~68%-divergent output CDF from the first
+adapted context.
+
+## 12. 2026-06-30 final cut — MPP's golden output, and the two-bug refinement
+
+A fifth comparison captured MPP's **correct** adapted CDF (`cabac_cdf_out`) and decoded output via
+libmpp's own dump path, byte-diffed against ours on **deterministic** frames. It confirms the
+below-software conclusion against MPP's golden output and splits the residual in two:
+
+- **Intra (all-intra) = metastable entropy** — the `cabac_cdf_out` ~68% fingerprint above; niche
+  (boundary-heavy intra only).
+- **Inter (real AV1 inter prediction) = deterministic motion-compensation.** The decoder emits a
+  previous reference frame unchanged ("frame-stuck") instead of running inter prediction. On these
+  frames the **entropy/CDF path matches MPP** — the adapted CDF is zero on the non-adapting inter frames
+  for *both* stacks — so the inter divergence is **not** entropy; it is the MC/prediction pixel path.
+  Same "stuck-on-reference" signature as the VP9 sibling on compound frames, and the product-relevant case.
+
+The "entropy/symbol-decoder state" framing above is therefore the *intra* case; the deterministic
+inter/compound bug is a motion-compensation fault. Both remain below the interface — driver-addressable
+in principle (MPP is correct on the same silicon), not reachable from software here.
