@@ -3,7 +3,8 @@
 A mainline-Linux **V4L2 stateless AV1 decoder** for the Rockchip **RK3576** SoC's
 **VDPU383** video IP, built on top of the now-mainline VDPU383 H.264/H.265
 `rkvdec` infrastructure and the V4L2 stateless AV1 uAPI. This is research /
-reference work — the first mainline attempt at AV1 on this silicon.
+reference work, shared in case it is useful to others working on AV1 for this
+silicon. AV1 for the VDPU383 is not yet in mainline.
 
 Everything the V4L2 software side controls is implemented and **byte-identical to
 the vendor library (MPP)**: sequence/frame/tile/film-grain controls, the full
@@ -55,7 +56,7 @@ stack.
 
 ---
 
-## The investigation, and why the conclusion is airtight
+## The investigation, and where the conclusion leads
 
 The decode of even the simplest possible frame — the all-intra conformance vector
 `av1-1-b8-02-allintra_20201006.ivf` (352×288, 4:2:0 8-bit, a single
@@ -65,6 +66,13 @@ the default CDF, then the entropy/symbol decode desynchronises and everything
 after cascades. With a soft IP reset before each decode the wrong output is
 deterministic; without it, it is non-deterministic (a small set of discrete wrong
 attractors carried as HW state between decodes).
+
+This vector is **all-intra**, and §1–§6 below dissect that case — which turns out to
+be an *entropy*-path effect. It is worth flagging up front that real AV1 with **inter
+prediction** fails differently and deterministically (a motion-compensation
+"frame-stuck" effect where the entropy path actually matches MPP); §7 covers that.
+The two share one root property — both sit below every software-visible interface —
+but they are distinct manifestations.
 
 ### 1. It is a driver bug, not silicon (the decisive measurement)
 
@@ -339,23 +347,25 @@ kernel or as the out-of-tree build on mainline 7.0 proven correct here (publishe
 [`rkvdec-vdpu383-mpp-mainline`](https://github.com/SympleNZ/rkvdec-vdpu383-mpp-mainline);
 licensing clean) — not this V4L2 driver.
 
-This V4L2 AV1 work stands as a **complete, evidence-bounded characterisation**: the
-first mainline-Linux V4L2 stateless AV1 attempt on the RK3576 VDPU383, the
+This V4L2 AV1 work stands as a **complete, evidence-bounded characterisation**: a
+mainline-Linux V4L2 stateless AV1 implementation for the RK3576 VDPU383, the
 infrastructure to drive it (controls, GBL pack, CDF tables, register/descriptor
 construction, both submission paths), one real correctness fix (CDEF un-remap),
-and the bug narrowed — from **four independent directions** (decode-op matching,
-MPP→ours reverse bisection, the graft, and the `mpp_service`-boundary diff) — to
-the VDPU383's internal entropy-decoder state, below every software interface on this
-silicon. The active hunt is **paused, not abandoned**: the deterministic harness,
-the `ip_reset` baseline, and the measurable `cabac_cdf_out` ~68%-divergence
-fingerprint are documented for anyone — with the VDPU383 docs or cycle-level
-tracing — who wants to take it further.
+and the bug narrowed — from **five independent directions** (decode-op matching,
+MPP→ours reverse bisection, the graft, the `mpp_service`-boundary diff, and the
+MPP-golden output differential) — to two HW-internal effects, both below every
+software interface on this silicon: a metastable *entropy* fault on intra (the
+`cabac_cdf_out` fingerprint) and a deterministic *motion-compensation* "frame-stuck"
+fault on inter/compound, where the entropy path matches MPP (§7). The active hunt is
+**paused, not abandoned**: the deterministic harness, the `ip_reset` baseline, the
+golden-CDF capture and the divergence fingerprints are documented for anyone — with
+the VDPU383 docs or cycle-level tracing — who wants to take it further.
 
 ---
 
 ## Related
 
-- [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — the sibling V4L2 VP9 driver (production-ready for KEY / single-ref / low-motion).
+- [`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) — the sibling V4L2 VP9 driver (bit-exact to MPP on KEY / single-reference / low-motion content; compound is the open gap).
 - [`rkvdec-vdpu383-mpp-mainline`](https://github.com/SympleNZ/rkvdec-vdpu383-mpp-mainline) — vendor MPP on a mainline kernel; the same-silicon proof harness.
 - [`rkvdec-vdpu383-h264-hevc`](https://github.com/SympleNZ/rkvdec-vdpu383-h264-hevc) — the mainline HEVC/H.264 read-cache throughput fix (7× / 2.4×), which ships in this driver's `src/`.
 
